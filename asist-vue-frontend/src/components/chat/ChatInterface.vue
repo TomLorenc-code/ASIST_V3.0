@@ -251,7 +251,7 @@
 import { ref, onMounted, watch, nextTick } from 'vue';
 import { useChatStore } from '@/stores/chatStore'; 
 import { marked } from 'marked'; 
-import { sendMessageStreaming } from '@/services/apiService';
+// UPDATED: Removed sendMessageStreaming import - no longer needed
 
 const props = defineProps({
   activeCaseId: {
@@ -342,6 +342,7 @@ const scrollToBottom = () => {
   });
 };
 
+// UPDATED: Complete rewrite of submitMessage for native streaming
 const submitMessage = async () => {
   const textToSend = userInput.value.trim();
   
@@ -371,11 +372,11 @@ const submitMessage = async () => {
   chatStore.currentSessionMessages.push(userMessage);
   userInput.value = '';
   
-  // Set up streaming state
+  // UPDATED: Set up streaming state
   isStreamingActive.value = true;
   streamingStatusMessage.value = 'Processing...';
   
-  // Create placeholder AI message
+  // UPDATED: Create placeholder AI message
   const aiMessageIndex = chatStore.currentSessionMessages.length;
   chatStore.currentSessionMessages.push({
     sender: 'ai',
@@ -388,7 +389,7 @@ const submitMessage = async () => {
   scrollToBottom();
   
   try {
-    // Prepare chat history (exclude the placeholder message)
+    // UPDATED: Prepare chat history (exclude the placeholder message)
     const chatHistory = chatStore.currentSessionMessages
       .slice(0, -1)
       .map(msg => ({
@@ -396,77 +397,122 @@ const submitMessage = async () => {
         content: msg.text
       }));
     
-    await sendMessageStreaming(
-      textToSend,
-      chatHistory,
-      chatStore.currentSessionContextDocuments,
-      (chunk) => {
-        switch(chunk.type) {
-          case 'metadata':
-            console.log('[Streaming Metadata]', chunk.data);
-            streamingStatusMessage.value = chunk.data.status === 'processing' ? 'Processing...' : '';
-            break;
+    // UPDATED: Call the streaming API with native fetch
+    const response = await fetch('/api/query/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        question: textToSend,
+        chat_history: chatHistory,
+        staged_chat_documents: chatStore.currentSessionContextDocuments
+      })
+    });
+
+    // UPDATED: Check response status
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    // UPDATED: Set up stream reading
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    // UPDATED: Read stream chunk by chunk
+    while (true) {
+      const { done, value } = await reader.read();
+      
+      if (done) {
+        console.log('[Streaming] Stream complete');
+        break;
+      }
+
+      // UPDATED: Decode the chunk
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n');
+
+      // UPDATED: Process each line of the Server-Sent Events format
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const jsonData = JSON.parse(line.slice(6));
             
-          case 'progress':
-            streamingStatusMessage.value = chunk.message;
-            console.log('[Streaming Progress]', chunk.message);
-            break;
-            
-          case 'intent':
-            console.log('[Streaming Intent]', chunk.data);
-            chatStore.currentSessionMessages[aiMessageIndex].metadata.intent = chunk.data.intent;
-            chatStore.currentSessionMessages[aiMessageIndex].metadata.intent_confidence = chunk.data.confidence;
-            break;
-            
-          case 'entities':
-            console.log('[Streaming Entities]', chunk.data);
-            chatStore.currentSessionMessages[aiMessageIndex].metadata.entities = chunk.data.entities;
-            chatStore.currentSessionMessages[aiMessageIndex].metadata.entities_found = chunk.data.count;
-            break;
-            
-          case 'answer_chunk':
-            // Append streaming content
-            chatStore.currentSessionMessages[aiMessageIndex].text += chunk.content;
-            scrollToBottom();
-            break;
-            
-          case 'complete':
-            console.log('[Streaming Complete]', chunk.data);
-            chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
-            
-            // Add final metadata
-            if (chunk.data) {
-              Object.assign(chatStore.currentSessionMessages[aiMessageIndex].metadata, chunk.data);
+            // UPDATED: Handle different event types
+            switch(jsonData.type) {
+              case 'start':
+                console.log('[Streaming] Started processing query');
+                streamingStatusMessage.value = 'Starting...';
+                break;
+                
+              case 'progress':
+                streamingStatusMessage.value = jsonData.message;
+                console.log(`[Streaming] ${jsonData.step}: ${jsonData.message}`);
+                break;
+                
+              case 'intent_complete':
+                console.log('[Streaming] Intent analysis complete:', jsonData.data);
+                chatStore.currentSessionMessages[aiMessageIndex].metadata.intent = jsonData.data.intent;
+                chatStore.currentSessionMessages[aiMessageIndex].metadata.intent_confidence = jsonData.data.confidence;
+                break;
+                
+              case 'entities_complete':
+                console.log('[Streaming] Entity extraction complete:', jsonData.data);
+                chatStore.currentSessionMessages[aiMessageIndex].metadata.entities = jsonData.data.entities;
+                chatStore.currentSessionMessages[aiMessageIndex].metadata.entities_found = jsonData.data.count;
+                chatStore.currentSessionMessages[aiMessageIndex].metadata.entity_confidence = jsonData.data.confidence;
+                break;
+                
+              case 'answer_start':
+                console.log('[Streaming] Answer generation started');
+                streamingStatusMessage.value = 'Generating answer...';
+                break;
+                
+              case 'answer_token':
+                // UPDATED: Append each token to the message in real-time
+                chatStore.currentSessionMessages[aiMessageIndex].text += jsonData.token;
+                scrollToBottom();
+                break;
+                
+              case 'answer_enhanced':
+                // UPDATED: Replace with enhanced version if provided
+                chatStore.currentSessionMessages[aiMessageIndex].text = jsonData.enhanced_answer;
+                scrollToBottom();
+                break;
+                
+              case 'complete':
+                console.log('[Streaming] Complete:', jsonData.data);
+                chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
+                
+                // UPDATED: Add final metadata
+                if (jsonData.data) {
+                  Object.assign(chatStore.currentSessionMessages[aiMessageIndex].metadata, jsonData.data);
+                }
+                
+                streamingStatusMessage.value = '';
+                isStreamingActive.value = false;
+                
+                // UPDATED: Save session
+                chatStore.saveChatSessionsToLS();
+                break;
+                
+              case 'error':
+                console.error('[Streaming] Error:', jsonData.error);
+                chatStore.currentSessionMessages[aiMessageIndex].text = `Error: ${jsonData.error}`;
+                chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
+                streamingStatusMessage.value = '';
+                isStreamingActive.value = false;
+                break;
             }
-            
-            streamingStatusMessage.value = '';
-            isStreamingActive.value = false;
-            
-            // Save session
-            chatStore.saveChatSessionsToLS();
-            break;
-            
-          case 'error':
-            console.error('[Streaming Error]', chunk.error);
-            chatStore.currentSessionMessages[aiMessageIndex].text = `Error: ${chunk.error}`;
-            chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
-            streamingStatusMessage.value = '';
-            isStreamingActive.value = false;
-            break;
-            
-          case 'done':
-            console.log('[Streaming Done]');
-            if (chatStore.currentSessionMessages[aiMessageIndex].streaming) {
-              chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
-            }
-            isStreamingActive.value = false;
-            streamingStatusMessage.value = '';
-            break;
+          } catch (parseError) {
+            console.error('[Streaming] Parse error:', parseError);
+          }
         }
       }
-    );
+    }
     
   } catch (error) {
+    // UPDATED: Enhanced error handling
     console.error('[ChatInterface] Streaming error:', error);
     chatStore.currentSessionMessages[aiMessageIndex].text = `Error: ${error.message}`;
     chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
@@ -631,6 +677,7 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
 </script>
 
 <style scoped>
+/* All CSS remains exactly the same - no changes needed */
 .chat-interface-panel {
   flex: 1; 
   background-color: white;

@@ -43,13 +43,8 @@
     </div>
     
     <div class="chat-messages" ref="chatMessagesContainerRef">
-      <div 
-        v-for="(message, index) in chatStore.currentSessionMessages" 
-        :key="index" 
-        class="message" 
-        :class="message.sender === 'user' ? 'user-message' : 'ai-message'"
-        :data-streaming="message.streaming"
-      >
+      <div v-for="(message, index) in chatStore.currentSessionMessages" :key="index" 
+           class="message" :class="message.sender === 'user' ? 'user-message' : 'ai-message'">
         <div class="message-avatar">{{ message.sender === 'user' ? chatStore.userInitialsForChat : 'AI' }}</div>
         <div class="message-content">
           <div v-html="renderMarkdown(message.text)"></div>
@@ -71,7 +66,7 @@
             </ul>
           </div>
           <!-- HIL Feedback Button for AI Messages -->
-          <div v-if="message.sender === 'ai' && !message.streaming" class="message-actions">
+          <div v-if="message.sender === 'ai'" class="message-actions">
             <button 
               class="hil-feedback-btn" 
               @click="openHilFeedback(message, index)"
@@ -82,22 +77,14 @@
           </div>
         </div>
       </div>
-      <div v-if="chatStore.isAiThinking && !isStreamingActive" class="message ai-message">
+      <div v-if="chatStore.isAiThinking" class="message ai-message">
         <div class="message-avatar">AI</div>
         <div class="message-content"><p>Thinking...</p></div>
       </div>
-      <div v-if="chatStore.chatError" class="message ai-message error-message-display">
+       <div v-if="chatStore.chatError" class="message ai-message error-message-display">
         <div class="message-avatar">AI</div>
         <div class="message-content"><p>Error: {{ chatStore.chatError }}</p></div>
       </div>
-    </div>
-    
-    <!-- Streaming Status Indicator -->
-    <div v-if="streamingStatusMessage" class="streaming-status">
-      <div class="status-icon">
-        <i class="fas fa-circle-notch fa-spin"></i>
-      </div>
-      <span>{{ streamingStatusMessage }}</span>
     </div>
     
     <div class="chat-input-area">
@@ -109,13 +96,10 @@
           title="Type your message"
           v-model="userInput"
           @keypress.enter.exact.prevent="submitMessage"
-          :disabled="chatStore.isUploadingToSession || isStreamingActive" 
+          :disabled="chatStore.isUploadingToSession" 
         >
-        <button 
-          @click="submitMessage" 
-          title="Send Message" 
-          :disabled="chatStore.isAiThinking || chatStore.isUploadingToSession || !userInput.trim() || isStreamingActive"
-        >
+        <button @click="submitMessage" title="Send Message" 
+                :disabled="chatStore.isAiThinking || chatStore.isUploadingToSession || !userInput.trim()">
           <i class="fas fa-paper-plane"></i>
         </button>
       </div>
@@ -248,10 +232,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, nextTick } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import { useChatStore } from '@/stores/chatStore'; 
 import { marked } from 'marked'; 
-import { sendMessageStreaming } from '@/services/apiService';
 
 const props = defineProps({
   activeCaseId: {
@@ -264,10 +247,6 @@ const chatStore = useChatStore();
 
 const userInput = ref('');
 const chatMessagesContainerRef = ref(null);
-
-// Streaming state
-const isStreamingActive = ref(false);
-const streamingStatusMessage = ref('');
 
 // HIL Feedback State
 const showHilFeedback = ref(false);
@@ -334,14 +313,6 @@ const triggerDeleteSession = () => {
   chatStore.deleteActiveSession();
 };
 
-const scrollToBottom = () => {
-  nextTick(() => {
-    if (chatMessagesContainerRef.value) {
-      chatMessagesContainerRef.value.scrollTop = chatMessagesContainerRef.value.scrollHeight;
-    }
-  });
-};
-
 const submitMessage = async () => {
   const textToSend = userInput.value.trim();
   
@@ -358,121 +329,10 @@ const submitMessage = async () => {
       return;
   }
   
-  console.log('[ChatInterface] Submitting message with streaming. Text:', textToSend);
+  console.log('[ChatInterface] Submitting message. Text:', textToSend);
+  await chatStore.sendMessageToBackend(textToSend, chatMessagesContainerRef); 
   
-  // Add user message immediately
-  const userMessage = {
-    sender: 'user',
-    text: textToSend,
-    timestamp: new Date().toISOString(),
-    sentContextDocuments: [...chatStore.currentSessionContextDocuments]
-  };
-  
-  chatStore.currentSessionMessages.push(userMessage);
-  userInput.value = '';
-  
-  // Set up streaming state
-  isStreamingActive.value = true;
-  streamingStatusMessage.value = 'Processing...';
-  
-  // Create placeholder AI message
-  const aiMessageIndex = chatStore.currentSessionMessages.length;
-  chatStore.currentSessionMessages.push({
-    sender: 'ai',
-    text: '',
-    timestamp: new Date().toISOString(),
-    streaming: true,
-    metadata: {}
-  });
-  
-  scrollToBottom();
-  
-  try {
-    // Prepare chat history (exclude the placeholder message)
-    const chatHistory = chatStore.currentSessionMessages
-      .slice(0, -1)
-      .map(msg => ({
-        role: msg.sender === 'user' ? 'user' : 'assistant',
-        content: msg.text
-      }));
-    
-    await sendMessageStreaming(
-      textToSend,
-      chatHistory,
-      chatStore.currentSessionContextDocuments,
-      (chunk) => {
-        switch(chunk.type) {
-          case 'metadata':
-            console.log('[Streaming Metadata]', chunk.data);
-            streamingStatusMessage.value = chunk.data.status === 'processing' ? 'Processing...' : '';
-            break;
-            
-          case 'progress':
-            streamingStatusMessage.value = chunk.message;
-            console.log('[Streaming Progress]', chunk.message);
-            break;
-            
-          case 'intent':
-            console.log('[Streaming Intent]', chunk.data);
-            chatStore.currentSessionMessages[aiMessageIndex].metadata.intent = chunk.data.intent;
-            chatStore.currentSessionMessages[aiMessageIndex].metadata.intent_confidence = chunk.data.confidence;
-            break;
-            
-          case 'entities':
-            console.log('[Streaming Entities]', chunk.data);
-            chatStore.currentSessionMessages[aiMessageIndex].metadata.entities = chunk.data.entities;
-            chatStore.currentSessionMessages[aiMessageIndex].metadata.entities_found = chunk.data.count;
-            break;
-            
-          case 'answer_chunk':
-            // Append streaming content
-            chatStore.currentSessionMessages[aiMessageIndex].text += chunk.content;
-            scrollToBottom();
-            break;
-            
-          case 'complete':
-            console.log('[Streaming Complete]', chunk.data);
-            chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
-            
-            // Add final metadata
-            if (chunk.data) {
-              Object.assign(chatStore.currentSessionMessages[aiMessageIndex].metadata, chunk.data);
-            }
-            
-            streamingStatusMessage.value = '';
-            isStreamingActive.value = false;
-            
-            // Save session
-            chatStore.saveChatSessionsToLS();
-            break;
-            
-          case 'error':
-            console.error('[Streaming Error]', chunk.error);
-            chatStore.currentSessionMessages[aiMessageIndex].text = `Error: ${chunk.error}`;
-            chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
-            streamingStatusMessage.value = '';
-            isStreamingActive.value = false;
-            break;
-            
-          case 'done':
-            console.log('[Streaming Done]');
-            if (chatStore.currentSessionMessages[aiMessageIndex].streaming) {
-              chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
-            }
-            isStreamingActive.value = false;
-            streamingStatusMessage.value = '';
-            break;
-        }
-      }
-    );
-    
-  } catch (error) {
-    console.error('[ChatInterface] Streaming error:', error);
-    chatStore.currentSessionMessages[aiMessageIndex].text = `Error: ${error.message}`;
-    chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
-    isStreamingActive.value = false;
-    streamingStatusMessage.value = '';
-  }
+  userInput.value = ''; 
 };
 
 // HIL Feedback Functions
@@ -482,6 +342,7 @@ const openHilFeedback = (message, index) => {
   showHilFeedback.value = true;
   activeHilTab.value = 'intent';
   
+  // Pre-populate with metadata if available
   const metadata = message.metadata || {};
   hilFeedback.value.intent.original = metadata.intent || '';
   
@@ -524,6 +385,7 @@ const submitHilFeedback = async () => {
   clearMessages();
   
   try {
+    // Get the user's original query from the messages
     const userMessage = chatStore.currentSessionMessages[selectedMessageIndex.value - 1];
     const query = userMessage?.text || '';
     
@@ -531,8 +393,12 @@ const submitHilFeedback = async () => {
       throw new Error('Could not find original user query');
     }
     
-    const hilPayload = { query: query };
+    // Prepare HIL update payload
+    const hilPayload = {
+      query: query
+    };
     
+    // Add intent correction if provided
     if (hilFeedback.value.intent.corrected) {
       hilPayload.intent_correction = {
         original_intent: hilFeedback.value.intent.original,
@@ -544,6 +410,7 @@ const submitHilFeedback = async () => {
       };
     }
     
+    // Add entity correction if provided
     if (hilFeedback.value.entities.corrected) {
       const originalEntities = hilFeedback.value.entities.original.split(',').map(e => e.trim()).filter(e => e);
       const correctedEntities = hilFeedback.value.entities.corrected.split(',').map(e => e.trim()).filter(e => e);
@@ -568,6 +435,7 @@ const submitHilFeedback = async () => {
       };
     }
     
+    // Add answer correction if provided
     if (hilFeedback.value.answer.corrected) {
       hilPayload.answer_correction = {
         original_answer: selectedMessage.value.text,
@@ -584,9 +452,12 @@ const submitHilFeedback = async () => {
     
     console.log('[HIL] Submitting feedback payload:', hilPayload);
     
+    // Submit to HIL endpoint
     const response = await fetch('/api/agents/hil_update', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify(hilPayload)
     });
     
@@ -600,6 +471,7 @@ const submitHilFeedback = async () => {
     
     hilSuccess.value = 'Feedback submitted successfully! The AI will learn from your corrections.';
     
+    // Close feedback after short delay
     setTimeout(() => {
       closeHilFeedback();
     }, 2000);
@@ -613,24 +485,27 @@ const submitHilFeedback = async () => {
 };
 
 onMounted(() => {
-  scrollToBottom(); 
+  chatStore._scrollToBottom(chatMessagesContainerRef); 
   console.log('[ChatInterface] Mounted. Active Case ID from prop:', props.activeCaseId);
 });
 
 watch(() => chatStore.currentSessionMessages, () => {
-  scrollToBottom();
+  chatStore._scrollToBottom(chatMessagesContainerRef);
 }, { deep: true });
 
 watch(() => chatStore.activeSessionId, (newId, oldId) => {
-    scrollToBottom();
+    chatStore._scrollToBottom(chatMessagesContainerRef);
     console.log(`[ChatInterface] Active session ID changed from ${oldId} to ${newId}`);
+    // Close HIL feedback when switching sessions
     if (showHilFeedback.value) {
       closeHilFeedback();
     }
 });
+
 </script>
 
 <style scoped>
+/* Existing styles... */
 .chat-interface-panel {
   flex: 1; 
   background-color: white;
@@ -725,7 +600,6 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
   font-size: 0.9rem;
   word-wrap: break-word;
   line-height: 1.4;
-  position: relative;
 }
 .user-message .message-content { background-color: var(--accent); color: white; border-top-right-radius: 4px; }
 .ai-message .message-content { background-color: #e9ecef; color: var(--text-dark); border-top-left-radius: 4px;}
@@ -733,44 +607,6 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
     background-color: var(--danger-soft-bg, #ffebee); 
     color: var(--danger);
     border: 1px solid var(--danger);
-}
-
-/* Streaming cursor animation */
-.message.ai-message[data-streaming="true"] .message-content::after {
-  content: '▋';
-  display: inline-block;
-  animation: blink 1s infinite;
-  margin-left: 2px;
-  color: var(--text-dark);
-}
-
-@keyframes blink {
-  0%, 49% { opacity: 1; }
-  50%, 100% { opacity: 0; }
-}
-
-/* Streaming status indicator */
-.streaming-status {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  padding: var(--space-xs) var(--space-sm);
-  background: linear-gradient(135deg, #e3f2fd, #bbdefb);
-  border-radius: 4px;
-  margin-bottom: var(--space-xs);
-  font-size: 0.85rem;
-  color: #1976d2;
-  animation: pulse 2s ease-in-out infinite;
-  flex-shrink: 0;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
-}
-
-.status-icon {
-  color: #1976d2;
 }
 
 /* Message Actions for HIL Feedback */

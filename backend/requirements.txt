@@ -1,0 +1,83 @@
+ requirements.txt
+# Dependencies for SAMM Entity Agent, Enhanced Answer Agent, and Testing Framework
+
+# Core Python libraries
+requests>=2.31.0
+asyncio-mqtt>=0.11.0
+
+# Database connections
+gremlinpython>=3.6.5
+chromadb>=0.4.15
+
+# Machine Learning and NLP
+sentence-transformers>=2.2.2
+torch>=2.0.0
+transformers>=4.33.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+openpyxl>=3.1.0
+
+# Statistical analysis (for testing framework)
+statistics>=1.0.3.5
+
+# JSON and data handling
+json5>=0.9.14
+
+# Date and time handling
+python-dateutil>=2.8.2
+
+# Type hints
+typing-extensions>=4.7.0
+
+# Flask and web framework dependencies
+Flask>=2.3.0
+Flask-CORS>=4.0.0
+Werkzeug>=2.3.0
+
+# Authentication and OAuth
+Authlib>=1.2.1
+
+# Environment management
+python-dotenv>=1.0.0
+
+# Azure SDK dependencies
+azure-cosmos>=4.5.0
+azure-storage-blob>=12.17.0
+azure-core>=1.29.0
+
+# Optional: For enhanced development and debugging
+ipython>=8.14.0
+jupyter>=1.0.0
+
+# Optional: For logging and monitoring
+loguru>=0.7.0
+
+# Optional: For API development if you want to expose agents as services
+fastapi>=0.103.0
+uvicorn>=0.23.0
+
+# Optional: For enhanced data visualization in reports
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Windows-specific (automatically installed on Windows)
+# pywin32>=306  # Uncomment if you need Windows-specific features
+
+# Development and testing dependencies (optional)
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.7.0
+flake8>=6.0.0
+
+# Specific versions for compatibility
+# Ensure compatibility between ChromaDB and sentence-transformers
+# sentence-transformers[all]>=2.2.2  # Uncomment for full feature set
+
+# Notes:
+# 1. Install Ollama separately: https://ollama.ai/download
+# 2. Make sure to have Python 3.8+ installed
+# 3. For Cosmos DB, ensure you have proper connection credentials
+# 4. ChromaDB will create local vector databases in specified directories
+# 5. Set up environment variables in .env file for Azure services

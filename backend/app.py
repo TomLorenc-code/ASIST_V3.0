@@ -185,52 +185,7 @@ else:
 from flask import Response, stream_with_context
 import json
 
-@app.route("/api/query/stream", methods=["POST"])
-def query_ai_assistant_stream():
-    """Streaming SAMM query endpoint"""
-    user = require_auth()
-    if not user:
-        return jsonify({"error": "User not authenticated"}), 401
-    
-    if not request.is_json:
-        return jsonify({"error": "Request must be JSON"}), 400
 
-    data = request.get_json()
-    user_input = data.get("question", "").strip()
-    chat_history = data.get("chat_history", [])
-    staged_chat_documents_metadata = data.get("staged_chat_documents", [])
-    
-    if not user_input:
-        return jsonify({"error": "Query cannot be empty"}), 400
-
-    def generate():
-        try:
-            # Send initial metadata
-            yield f"data: {json.dumps({'type': 'metadata', 'data': {'status': 'processing'}})}\n\n"
-            
-            # Process query through orchestrator
-            # Note: You'll need to modify process_samm_query to support streaming
-            result = process_samm_query_streaming(user_input, chat_history, staged_chat_documents_metadata)
-            
-            # Stream the result
-            for chunk in result:
-                yield f"data: {json.dumps(chunk)}\n\n"
-            
-            # Send completion signal
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-            
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
-    
-    return Response(
-        stream_with_context(generate()),
-        mimetype='text/event-stream',
-        headers={
-            'Cache-Control': 'no-cache',
-            'X-Accel-Buffering': 'no',
-            'Connection': 'keep-alive'
-        }
-    )
 
 
 def call_ollama_streaming(prompt: str, system_message: str = "", temperature: float = 0.1):
@@ -888,6 +843,7 @@ class IntentAgent:
         self.intent_patterns = {}    # Store learned patterns from feedback
         self.trigger_updates = []    # Store updates from new entity/relationship data
     
+    @time_function
     def analyze_intent(self, query: str) -> Dict[str, Any]:
         # Check if we have learned patterns from previous feedback
         enhanced_system_msg = self._build_enhanced_system_message()
@@ -1709,6 +1665,7 @@ class EnhancedAnswerAgent:
         }
         
         print("[EnhancedAnswerAgent] Initialization complete")
+
     @time_function
     def generate_answer(self, query: str, intent_info: Dict, entity_info: Dict, 
                        chat_history: List = None, documents_context: List = None) -> str:
@@ -2590,7 +2547,7 @@ class SimpleStateOrchestrator:
         print(f"[State Orchestrator] Initialized query: '{state['query']}'")
         return state
     
-    @time_function
+    
     def _analyze_intent_step(self, state: AgentState) -> AgentState:
         """Execute intent analysis step"""
         try:
@@ -2644,10 +2601,113 @@ class SimpleStateOrchestrator:
         print(f"[State Orchestrator] Error handled: {state['error']}")
         return state
 
+
+
+@app.route("/api/query/stream", methods=["POST"])
+def query_ai_assistant_stream():
+    """Streaming SAMM query endpoint with real-time updates"""
+    user = require_auth()
+    if not user:
+        return jsonify({"error": "User not authenticated"}), 401
+    
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+
+    data = request.get_json()
+    user_input = data.get("question", "").strip()
+    chat_history = data.get("chat_history", [])
+    staged_chat_documents_metadata = data.get("staged_chat_documents", [])
+    
+    if not user_input:
+        return jsonify({"error": "Query cannot be empty"}), 400
+
+    def generate():
+        try:
+            start_time = time.time()
+            
+            # START - Send immediately
+            yield f"data: {json.dumps({'type': 'start', 'query': user_input, 'timestamp': time.time()})}\n\n"
+            
+            # STEP 1: Intent Analysis - Stream progress
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'intent_analysis', 'message': 'Analyzing query intent...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+            
+            intent_start = time.time()
+            intent_info = orchestrator.intent_agent.analyze_intent(user_input)
+            intent_time = round(time.time() - intent_start, 2)
+            
+            yield f"data: {json.dumps({'type': 'intent_complete', 'data': intent_info, 'time': intent_time})}\n\n"
+            
+            # STEP 2: Entity Extraction - Stream progress immediately
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'entity_extraction', 'message': 'Extracting entities and querying databases...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+            
+            entity_start = time.time()
+            entity_info = orchestrator.entity_agent.extract_and_retrieve(user_input, intent_info)
+            entity_time = round(time.time() - entity_start, 2)
+            
+            yield f"data: {json.dumps({'type': 'entities_complete', 'data': {'count': len(entity_info.get('entities', [])), 'entities': entity_info.get('entities', []), 'confidence': entity_info.get('overall_confidence', 0)}, 'time': entity_time})}\n\n"
+            
+            # STEP 3: Answer Generation - Stream this immediately before generating
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'answer_generation', 'message': 'Generating answer...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+            
+            answer_start = time.time()
+            
+            # Build context
+            context = orchestrator.answer_agent._build_comprehensive_context(
+                user_input, intent_info, entity_info, chat_history, staged_chat_documents_metadata
+            )
+            
+            intent = intent_info.get("intent", "general")
+            system_msg = orchestrator.answer_agent._create_optimized_system_message(intent, context)
+            prompt = orchestrator.answer_agent._create_enhanced_prompt(user_input, intent_info, entity_info)
+            
+            # Signal that streaming answer is about to start
+            yield f"data: {json.dumps({'type': 'answer_start', 'message': 'Streaming answer...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+            
+            # Stream the answer token by token
+            full_answer = ""
+            token_count = 0
+            
+            for token in call_ollama_streaming(prompt, system_msg, temperature=0.1):
+                if token and not token.startswith("Error"):
+                    full_answer += token
+                    token_count += 1
+                    # Send each token immediately
+                    yield f"data: {json.dumps({'type': 'answer_token', 'token': token, 'position': token_count})}\n\n"
+            
+            answer_time = round(time.time() - answer_start, 2)
+            total_time = round(time.time() - start_time, 2)
+            
+            # Apply post-processing enhancements
+            enhanced_answer = orchestrator.answer_agent._enhance_answer_quality(
+                full_answer, intent_info, entity_info
+            )
+            
+            # Send final enhanced answer if different from streamed version
+            if enhanced_answer != full_answer:
+                yield f"data: {json.dumps({'type': 'answer_enhanced', 'enhanced_answer': enhanced_answer})}\n\n"
+            
+            # Send completion with all metadata
+            yield f"data: {json.dumps({'type': 'complete', 'data': {'intent': intent, 'entities_found': len(entity_info.get('entities', [])), 'answer_length': len(enhanced_answer), 'token_count': token_count, 'timings': {'intent': intent_time, 'entity': entity_time, 'answer': answer_time, 'total': total_time}}})}\n\n"
+            
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            print(f"[Streaming Error] {error_detail}")
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e), 'detail': error_detail})}\n\n"
+    
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive'
+        }
+    )
 # Initialize integrated orchestrator with all agents
 orchestrator = SimpleStateOrchestrator()
 print("Integrated State Orchestrator initialized with Intent, Integrated Entity (Database), and Enhanced Answer agents")
-
+@time_function
 def process_samm_query(query: str, chat_history: List = None, documents_context: List = None) -> Dict[str, Any]:
     """Process query through integrated state orchestrated 3-agent system with database connections"""
     return orchestrator.process_query(query, chat_history, documents_context)

@@ -123,6 +123,12 @@ cache_stats = {
 
 print(f"Cache Configuration: Enabled={CACHE_ENABLED}, TTL={CACHE_TTL_SECONDS}s, Max Size={CACHE_MAX_SIZE}")
 
+# ITAR Compliance Integration
+COMPLIANCE_SERVICE_URL = os.getenv("COMPLIANCE_SERVICE_URL", "http://localhost:3002")
+COMPLIANCE_ENABLED = os.getenv("COMPLIANCE_ENABLED", "true").lower() == "true"
+DEFAULT_DEV_AUTH_LEVEL = os.getenv("DEFAULT_DEV_AUTH_LEVEL", "top_secret")
+
+print(f"ITAR Compliance: {'Enabled' if COMPLIANCE_ENABLED else 'Disabled'} (Default Level: {DEFAULT_DEV_AUTH_LEVEL})")
 # =============================================================================
 # CACHE HELPER FUNCTIONS
 # =============================================================================
@@ -1780,18 +1786,55 @@ class EnhancedAnswerAgent:
         
         print("[EnhancedAnswerAgent] Initialization complete")
 
+ 
     @time_function
     def generate_answer(self, query: str, intent_info: Dict, entity_info: Dict, 
-                       chat_history: List = None, documents_context: List = None) -> str:
+                    chat_history: List = None, documents_context: List = None,
+                    user_profile: Dict = None) -> str:  # ← ADDED user_profile parameter
         """
-        Main method for enhanced answer generation with improved error handling
+        Main method for enhanced answer generation with ITAR compliance filtering
         """
         intent = intent_info.get("intent", "general")
         confidence = intent_info.get("confidence", 0.5)
         
         print(f"[Enhanced AnswerAgent] Generating answer for intent: {intent} (confidence: {confidence:.2f})")
-        
+
         try:
+            # === ITAR COMPLIANCE CHECK (NEW SECTION) ===
+            compliance_result = check_compliance(query, intent_info, entity_info, user_profile)
+            
+            # Log compliance check
+            if compliance_result.get("check_performed"):
+                print(f"[Compliance] Check performed: {compliance_result.get('compliance_status')}")
+                print(f"[Compliance] User level: {compliance_result.get('user_authorization_level')}")
+                print(f"[Compliance] Authorized: {compliance_result.get('authorized')}")
+            
+            # Handle unauthorized access
+            if not compliance_result.get("authorized", True):
+                required_level = compliance_result.get('required_authorization_level', 'higher authorization')
+                user_level = compliance_result.get('user_authorization_level', 'unknown')
+                recommendations = compliance_result.get("recommendations", [])
+                
+                # Build denial response
+                response = (
+                    f"⚠️ **ITAR COMPLIANCE NOTICE**\n\n"
+                    f"This query involves controlled information requiring **{required_level.upper()}** clearance.\n"
+                    f"Your current authorization: **{user_level.upper()}**\n\n"
+                )
+                
+                if recommendations:
+                    response += "**Recommendations:**\n" + "\n".join(f"• {r}" for r in recommendations)
+                
+                print(f"[Compliance] Access denied: {user_level} < {required_level}")
+                return response
+            
+            # Log successful compliance check
+            if compliance_result.get("check_performed"):
+                print(f"[Compliance] Query authorized - proceeding with answer generation")
+            # === END ITAR COMPLIANCE CHECK ===
+            
+            # EXISTING CODE CONTINUES UNCHANGED FROM HERE
+            
             # Step 1: Check for existing corrections first
             cached_answer = self._check_for_corrections(query, intent_info, entity_info)
             if cached_answer:
@@ -1824,7 +1867,7 @@ class EnhancedAnswerAgent:
         except Exception as e:
             print(f"[AnswerAgent] Error during answer generation: {e}")
             return f"I apologize, but I encountered an error while generating the answer: {str(e)}. Please try rephrasing your question or check if the Ollama service is running."
-    
+
     def _check_for_corrections(self, query: str, intent_info: Dict, entity_info: Dict) -> Optional[str]:
         """Check if we have a stored correction for similar queries"""
         try:
@@ -2435,6 +2478,62 @@ CRITICAL REQUIREMENTS:
             print(f"[AnswerAgent] Error updating from trigger: {e}")
             return False
 
+def check_compliance(query: str, intent_info: Dict, entity_info: Dict, user_profile: Dict = None) -> Dict[str, Any]:
+    """
+    Check ITAR compliance - defaults to TOP_SECRET for development
+    Fails open (permits access) if service unavailable
+    """
+    if not COMPLIANCE_ENABLED:
+        return {
+            "compliance_status": "compliant",
+            "authorized": True,
+            "user_authorization_level": DEFAULT_DEV_AUTH_LEVEL,
+            "content_guidance": {"allowed_detail_level": "full"},
+            "restrictions": [],
+            "check_performed": False
+        }
+    
+    # Set default dev authorization
+    if not user_profile:
+        user_profile = {"authorization_level": DEFAULT_DEV_AUTH_LEVEL}
+    elif "authorization_level" not in user_profile:
+        user_profile["authorization_level"] = DEFAULT_DEV_AUTH_LEVEL
+    
+    try:
+        response = requests.post(
+            f"{COMPLIANCE_SERVICE_URL}/api/compliance/verify",
+            json={
+                "query": query,
+                "intent_info": intent_info,
+                "entity_info": entity_info,
+                "user_profile": user_profile
+            },
+            timeout=15  # INCREASED from 5 to 15 seconds
+        )
+        response.raise_for_status()
+        result = response.json()
+        result["check_performed"] = True
+        return result
+        
+    except requests.exceptions.Timeout:
+        print(f"[Compliance] Service timeout - defaulting to permissive mode")
+    except requests.exceptions.ConnectionError:
+        print(f"[Compliance] Service unavailable - defaulting to permissive mode")
+    except Exception as e:
+        print(f"[Compliance] Error: {e} - defaulting to permissive mode")
+    
+    # Fail open for development
+    return {
+        "compliance_status": "compliant",
+        "authorized": True,
+        "user_authorization_level": DEFAULT_DEV_AUTH_LEVEL,
+        "content_guidance": {"allowed_detail_level": "full"},
+        "restrictions": [],
+        "check_performed": False,
+        "fallback_reason": "service_unavailable"
+    }
+
+
 class SimpleStateOrchestrator:
     """Simple LangGraph-style state orchestration for integrated SAMM agents with HIL and trigger updates"""
     
@@ -2463,7 +2562,8 @@ class SimpleStateOrchestrator:
             WorkflowStep.ERROR: None
         }
     @time_function
-    def process_query(self, query: str, chat_history: List = None, documents_context: List = None) -> Dict[str, Any]:
+    def process_query(self, query: str, chat_history: List = None, documents_context: List = None,
+                     user_profile: Dict = None) -> Dict[str, Any]:
         """Process query through integrated state orchestrated workflow"""
         # Initialize state
         state = AgentState(
@@ -2478,7 +2578,7 @@ class SimpleStateOrchestrator:
             current_step=WorkflowStep.INIT.value,
             error=None
         )
-        
+        state['user_profile'] = user_profile or {"authorization_level": DEFAULT_DEV_AUTH_LEVEL}
         try:
             # Execute workflow
             current_step = WorkflowStep.INIT
@@ -2719,7 +2819,7 @@ class SimpleStateOrchestrator:
 
 @app.route("/api/query/stream", methods=["POST"])
 def query_ai_assistant_stream():
-    """Streaming SAMM query endpoint with real-time updates"""
+    """Streaming SAMM query endpoint with ITAR compliance and real-time updates"""
     user = require_auth()
     if not user:
         return jsonify({"error": "User not authenticated"}), 401
@@ -2735,6 +2835,16 @@ def query_ai_assistant_stream():
     if not user_input:
         return jsonify({"error": "Query cannot be empty"}), 400
 
+    # === Extract user authorization profile ===
+    user_id = user["sub"]
+    user_profile = {
+        "user_id": user_id,
+        "authorization_level": user.get("authorization_level", DEFAULT_DEV_AUTH_LEVEL),
+        "clearances": user.get("clearances", []),
+        "role": user.get("role", "developer")
+    }
+    # === END ===
+
     def generate():
         try:
             start_time = time.time()
@@ -2742,7 +2852,7 @@ def query_ai_assistant_stream():
             # START - Send immediately
             yield f"data: {json.dumps({'type': 'start', 'query': user_input, 'timestamp': time.time()})}\n\n"
             
-            # STEP 1: Intent Analysis - Stream progress
+            # STEP 1: Intent Analysis
             yield f"data: {json.dumps({'type': 'progress', 'step': 'intent_analysis', 'message': 'Analyzing query intent...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
             
             intent_start = time.time()
@@ -2751,7 +2861,7 @@ def query_ai_assistant_stream():
             
             yield f"data: {json.dumps({'type': 'intent_complete', 'data': intent_info, 'time': intent_time})}\n\n"
             
-            # STEP 2: Entity Extraction - Stream progress immediately
+            # STEP 2: Entity Extraction
             yield f"data: {json.dumps({'type': 'progress', 'step': 'entity_extraction', 'message': 'Extracting entities and querying databases...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
             
             entity_start = time.time()
@@ -2760,7 +2870,37 @@ def query_ai_assistant_stream():
             
             yield f"data: {json.dumps({'type': 'entities_complete', 'data': {'count': len(entity_info.get('entities', [])), 'entities': entity_info.get('entities', []), 'confidence': entity_info.get('overall_confidence', 0)}, 'time': entity_time})}\n\n"
             
-            # STEP 3: Answer Generation - Stream this immediately before generating
+            # === STEP 3: ITAR COMPLIANCE CHECK (NEW) ===
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'compliance_check', 'message': 'Checking ITAR compliance...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+            
+            compliance_start = time.time()
+            compliance_result = check_compliance(user_input, intent_info, entity_info, user_profile)
+            compliance_time = round(time.time() - compliance_start, 2)
+            
+            yield f"data: {json.dumps({'type': 'compliance_complete', 'data': {'status': compliance_result.get('compliance_status'), 'authorized': compliance_result.get('authorized'), 'user_level': compliance_result.get('user_authorization_level')}, 'time': compliance_time})}\n\n"
+            
+            # Check authorization
+            if not compliance_result.get("authorized", True):
+                required_level = compliance_result.get('required_authorization_level', 'higher')
+                user_level = compliance_result.get('user_authorization_level', 'unknown')
+                recommendations = compliance_result.get("recommendations", [])
+                
+                denial_msg = (
+                    f"⚠️ ITAR COMPLIANCE NOTICE\n\n"
+                    f"This query requires {required_level.upper()} clearance.\n"
+                    f"Your authorization: {user_level.upper()}\n\n"
+                )
+                
+                if recommendations:
+                    denial_msg += "Recommendations:\n" + "\n".join(f"• {r}" for r in recommendations)
+                
+                yield f"data: {json.dumps({'type': 'answer_start', 'message': 'Access restricted'})}\n\n"
+                yield f"data: {json.dumps({'type': 'answer_token', 'token': denial_msg, 'position': 1})}\n\n"
+                yield f"data: {json.dumps({'type': 'complete', 'data': {'compliance_denied': True, 'timings': {'total': round(time.time() - start_time, 2)}}})}\n\n"
+                return
+            # === END COMPLIANCE CHECK ===
+            
+            # STEP 4: Answer Generation (only if authorized)
             yield f"data: {json.dumps({'type': 'progress', 'step': 'answer_generation', 'message': 'Generating answer...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
             
             answer_start = time.time()
@@ -2785,7 +2925,6 @@ def query_ai_assistant_stream():
                 if token and not token.startswith("Error"):
                     full_answer += token
                     token_count += 1
-                    # Send each token immediately
                     yield f"data: {json.dumps({'type': 'answer_token', 'token': token, 'position': token_count})}\n\n"
             
             answer_time = round(time.time() - answer_start, 2)
@@ -2796,12 +2935,12 @@ def query_ai_assistant_stream():
                 full_answer, intent_info, entity_info
             )
             
-            # Send final enhanced answer if different from streamed version
+            # Send final enhanced answer if different
             if enhanced_answer != full_answer:
                 yield f"data: {json.dumps({'type': 'answer_enhanced', 'enhanced_answer': enhanced_answer})}\n\n"
             
             # Send completion with all metadata
-            yield f"data: {json.dumps({'type': 'complete', 'data': {'intent': intent, 'entities_found': len(entity_info.get('entities', [])), 'answer_length': len(enhanced_answer), 'token_count': token_count, 'timings': {'intent': intent_time, 'entity': entity_time, 'answer': answer_time, 'total': total_time}}})}\n\n"
+            yield f"data: {json.dumps({'type': 'complete', 'data': {'compliance_approved': True, 'intent': intent, 'entities_found': len(entity_info.get('entities', [])), 'answer_length': len(enhanced_answer), 'token_count': token_count, 'timings': {'intent': intent_time, 'entity': entity_time, 'compliance': compliance_time, 'answer': answer_time, 'total': total_time}}})}\n\n"
             
         except Exception as e:
             import traceback
@@ -2818,14 +2957,17 @@ def query_ai_assistant_stream():
             'Connection': 'keep-alive'
         }
     )
+
+
 # Initialize integrated orchestrator with all agents
 orchestrator = SimpleStateOrchestrator()
 print("Integrated State Orchestrator initialized with Intent, Integrated Entity (Database), and Enhanced Answer agents")
-@time_function
-def process_samm_query(query: str, chat_history: List = None, documents_context: List = None) -> Dict[str, Any]:
-    """Process query through integrated state orchestrated 3-agent system with database connections"""
-    return orchestrator.process_query(query, chat_history, documents_context)
 
+@time_function
+def process_samm_query(query: str, chat_history: List = None, documents_context: List = None,
+                      user_profile: Dict = None) -> Dict[str, Any]:
+    """Process query through integrated state orchestrated 3-agent system with ITAR compliance"""
+    return orchestrator.process_query(query, chat_history, documents_context, user_profile)
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
@@ -3232,9 +3374,10 @@ def delete_chat_attachment():
         print(f"[API DeleteChatAttachment] Error deleting blob '{blob_name}': {str(e)}")
         return jsonify({"error": "Failed to delete file from storage.", "details": str(e)}), 500
 
+
 @app.route("/api/query", methods=["POST"])
 def query_ai_assistant():
-    """Main SAMM query endpoint using Integrated state orchestrated 3-agent system with caching"""
+    """Main SAMM query endpoint using Integrated state orchestrated 3-agent system with caching and ITAR compliance"""
     user = require_auth()
     if not user:
         return jsonify({"error": "User not authenticated"}), 401
@@ -3253,9 +3396,17 @@ def query_ai_assistant():
         if not user_input:
             return jsonify({"error": "Query cannot be empty"}), 400
 
-        print(f"[Integrated SAMM Query] User: {user_id}, Processing: '{user_input}'")
-        
-        # STEP 1: Check cache first
+        # === Extract user authorization profile (NEW) ===
+        user_profile = {
+            "user_id": user_id,
+            "authorization_level": user.get("authorization_level", DEFAULT_DEV_AUTH_LEVEL),
+            "clearances": user.get("clearances", []),
+            "role": user.get("role", "developer")
+        }
+        print(f"[Integrated SAMM Query] User: {user_id}, Auth: {user_profile['authorization_level']}, Query: '{user_input[:50]}...'")
+        # === END ===
+
+        # STEP 1: Check cache first (EXISTING - UNCHANGED)
         cached_result = get_from_cache(user_input)
         
         if cached_result:
@@ -3272,22 +3423,23 @@ def query_ai_assistant():
             
             return jsonify(response_data)
         
-        # STEP 2: Cache miss - process query normally
+        # STEP 2: Cache miss - process query normally (EXISTING - UNCHANGED)
         print(f"[Integrated SAMM Query] Chat History items: {len(chat_history)}")
         print(f"[Integrated SAMM Query] Staged Chat Documents: {len(staged_chat_documents_metadata)}")
         
         # Process through Integrated state orchestrated 3-agent system with database connections
-        result = process_samm_query(user_input, chat_history, staged_chat_documents_metadata)
+        # UPDATED: Now passes user_profile for ITAR compliance
+        result = process_samm_query(user_input, chat_history, staged_chat_documents_metadata, user_profile)
         
         print(f"[Integrated SAMM Result] Intent: {result['intent']}, Entities: {result['entities_found']}, Time: {result['execution_time']}s")
         print(f"[Integrated SAMM Result] Workflow Steps: {len(result.get('execution_steps', []))}")
         print(f"[Integrated SAMM Result] System Version: {result['metadata'].get('system_version', 'Unknown')}")
         print(f"[Integrated SAMM Result] Database Results: {result['metadata'].get('total_database_results', 0)}")
         
-        # STEP 3: Save to cache
+        # STEP 3: Save to cache (EXISTING - UNCHANGED)
         save_to_cache(user_input, result['answer'], result['metadata'])
         
-        # Return response in the same format as before for Vue.js UI compatibility
+        # Return response in the same format as before for Vue.js UI compatibility (EXISTING - UNCHANGED)
         response_data = {
             "response": {"answer": result["answer"]},
             "metadata": result["metadata"],
@@ -3295,7 +3447,7 @@ def query_ai_assistant():
             "cached": False  # Fresh answer
         }
         
-        # Add execution steps only in debug mode or if requested
+        # Add execution steps only in debug mode or if requested (EXISTING - UNCHANGED)
         if data.get("debug", False) or data.get("include_workflow", False):
             response_data["execution_steps"] = result.get("execution_steps", [])
             response_data["workflow_info"] = {
@@ -3315,6 +3467,7 @@ def query_ai_assistant():
         print(f"[Integrated SAMM Query] Error: {str(e)}")
         return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
     
+
 @app.route("/api/cache/stats", methods=["GET"])
 def get_cache_statistics():
     """Get cache performance statistics"""

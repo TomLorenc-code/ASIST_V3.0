@@ -1,4 +1,3 @@
-
 # app.py - Complete Integrated SAMM ASIST System with Enhanced Agents
 import os
 import json
@@ -104,6 +103,120 @@ VECTOR_DB_PATH = "./vector_db"
 VECTOR_DB_TTL_PATH = "./vector_db_ttl"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
+# =============================================================================
+# CACHE CONFIGURATION
+# =============================================================================
+
+# Cache settings
+CACHE_ENABLED = os.getenv("CACHE_ENABLED", "true").lower() == "true"
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))  # 1 hour default
+CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "1000"))  # Maximum cached items
+
+# In-memory cache structures
+query_cache = {}  # Structure: {normalized_query: {answer, metadata, timestamp}}
+cache_stats = {
+    "hits": 0,
+    "misses": 0,
+    "total_queries": 0,
+    "cache_size": 0
+}
+
+print(f"Cache Configuration: Enabled={CACHE_ENABLED}, TTL={CACHE_TTL_SECONDS}s, Max Size={CACHE_MAX_SIZE}")
+
+# =============================================================================
+# CACHE HELPER FUNCTIONS
+# =============================================================================
+
+def normalize_query_for_cache(query: str) -> str:
+    """
+    Normalize query for cache key matching
+    - Lowercase, strip whitespace, remove punctuation
+    - Sort words to catch similar questions with different word order
+    """
+    import string
+    # Remove punctuation and convert to lowercase
+    query_clean = query.lower().translate(str.maketrans('', '', string.punctuation))
+    # Split into words and sort
+    words = query_clean.split()
+    # Remove common stop words that don't affect meaning
+    stop_words = {'what', 'is', 'are', 'the', 'a', 'an', 'does', 'do', 'can', 'how'}
+    significant_words = [w for w in words if w not in stop_words and len(w) > 2]
+    # Return sorted words as key
+    return ' '.join(sorted(significant_words))
+
+def get_from_cache(query: str) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve cached answer for a query
+    Returns None if not found or expired
+    """
+    if not CACHE_ENABLED:
+        return None
+    
+    cache_key = normalize_query_for_cache(query)
+    
+    if cache_key in query_cache:
+        cached_entry = query_cache[cache_key]
+        
+        # Check if cache entry is still valid (TTL check)
+        age_seconds = time.time() - cached_entry['timestamp']
+        if age_seconds < CACHE_TTL_SECONDS:
+            cache_stats['hits'] += 1
+            cache_stats['total_queries'] += 1
+            print(f"[Cache HIT] Query: '{query[:50]}...' (age: {age_seconds:.1f}s)")
+            return cached_entry
+        else:
+            # Expired - remove it
+            del query_cache[cache_key]
+            print(f"[Cache EXPIRED] Query: '{query[:50]}...' (age: {age_seconds:.1f}s)")
+    
+    cache_stats['misses'] += 1
+    cache_stats['total_queries'] += 1
+    print(f"[Cache MISS] Query: '{query[:50]}...'")
+    return None
+
+def save_to_cache(query: str, answer: str, metadata: Dict[str, Any]) -> bool:
+    """
+    Save query-answer pair to cache
+    Implements LRU eviction if cache is full
+    """
+    if not CACHE_ENABLED:
+        return False
+    
+    cache_key = normalize_query_for_cache(query)
+    
+    # Check cache size limit
+    if len(query_cache) >= CACHE_MAX_SIZE and cache_key not in query_cache:
+        # Evict oldest entry (simple LRU)
+        oldest_key = min(query_cache.keys(), key=lambda k: query_cache[k]['timestamp'])
+        del query_cache[oldest_key]
+        print(f"[Cache EVICT] Removed oldest entry to make room")
+    
+    # Save to cache
+    query_cache[cache_key] = {
+        'original_query': query,
+        'answer': answer,
+        'metadata': metadata,
+        'timestamp': time.time()
+    }
+    
+    cache_stats['cache_size'] = len(query_cache)
+    print(f"[Cache SAVE] Query: '{query[:50]}...' (cache size: {len(query_cache)})")
+    return True
+
+def get_cache_stats() -> Dict[str, Any]:
+    """Get cache statistics"""
+    hit_rate = (cache_stats['hits'] / cache_stats['total_queries'] * 100) if cache_stats['total_queries'] > 0 else 0
+    
+    return {
+        'enabled': CACHE_ENABLED,
+        'total_queries': cache_stats['total_queries'],
+        'cache_hits': cache_stats['hits'],
+        'cache_misses': cache_stats['misses'],
+        'hit_rate_percent': round(hit_rate, 2),
+        'current_size': len(query_cache),
+        'max_size': CACHE_MAX_SIZE,
+        'ttl_seconds': CACHE_TTL_SECONDS
+    }
 # --- Flask App Initialization ---
 app = Flask(__name__, static_folder='static')
 app.secret_key = APP_SECRET_KEY
@@ -3121,7 +3234,7 @@ def delete_chat_attachment():
 
 @app.route("/api/query", methods=["POST"])
 def query_ai_assistant():
-    """Main SAMM query endpoint using Integrated state orchestrated 3-agent system with database connections"""
+    """Main SAMM query endpoint using Integrated state orchestrated 3-agent system with caching"""
     user = require_auth()
     if not user:
         return jsonify({"error": "User not authenticated"}), 401
@@ -3141,6 +3254,25 @@ def query_ai_assistant():
             return jsonify({"error": "Query cannot be empty"}), 400
 
         print(f"[Integrated SAMM Query] User: {user_id}, Processing: '{user_input}'")
+        
+        # STEP 1: Check cache first
+        cached_result = get_from_cache(user_input)
+        
+        if cached_result:
+            # Cache hit - return cached answer with cache metadata
+            print(f"[Cache] Returning cached answer for: '{user_input[:50]}...'")
+            
+            response_data = {
+                "response": {"answer": cached_result['answer']},
+                "metadata": cached_result['metadata'],
+                "uploadedChatDocuments": [],
+                "cached": True,
+                "cache_age_seconds": round(time.time() - cached_result['timestamp'], 2)
+            }
+            
+            return jsonify(response_data)
+        
+        # STEP 2: Cache miss - process query normally
         print(f"[Integrated SAMM Query] Chat History items: {len(chat_history)}")
         print(f"[Integrated SAMM Query] Staged Chat Documents: {len(staged_chat_documents_metadata)}")
         
@@ -3152,11 +3284,15 @@ def query_ai_assistant():
         print(f"[Integrated SAMM Result] System Version: {result['metadata'].get('system_version', 'Unknown')}")
         print(f"[Integrated SAMM Result] Database Results: {result['metadata'].get('total_database_results', 0)}")
         
+        # STEP 3: Save to cache
+        save_to_cache(user_input, result['answer'], result['metadata'])
+        
         # Return response in the same format as before for Vue.js UI compatibility
         response_data = {
             "response": {"answer": result["answer"]},
             "metadata": result["metadata"],
-            "uploadedChatDocuments": []  # For future AI-generated documents
+            "uploadedChatDocuments": [],  # For future AI-generated documents
+            "cached": False  # Fresh answer
         }
         
         # Add execution steps only in debug mode or if requested
@@ -3178,7 +3314,38 @@ def query_ai_assistant():
     except Exception as e:
         print(f"[Integrated SAMM Query] Error: {str(e)}")
         return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
-
+    
+@app.route("/api/cache/stats", methods=["GET"])
+def get_cache_statistics():
+    """Get cache performance statistics"""
+    user = require_auth()
+    if not user:
+        return jsonify({"error": "User not authenticated"}), 401
+    
+    stats = get_cache_stats()
+    
+    # Add additional details
+    cache_entries = []
+    for key, entry in list(query_cache.items())[:10]:  # Show top 10 most recent
+        age_seconds = time.time() - entry['timestamp']
+        cache_entries.append({
+            "query": entry['original_query'][:100],  # Truncate long queries
+            "age_seconds": round(age_seconds, 2),
+            "intent": entry['metadata'].get('intent', 'unknown'),
+            "entities_found": entry['metadata'].get('entities_found', 0)
+        })
+    
+    return jsonify({
+        "statistics": stats,
+        "recent_entries": cache_entries,
+        "cache_enabled": CACHE_ENABLED,
+        "configuration": {
+            "ttl_seconds": CACHE_TTL_SECONDS,
+            "max_size": CACHE_MAX_SIZE
+        },
+        "timestamp": datetime.now().isoformat()
+    })
+   
 @app.route("/api/system/status", methods=["GET"])
 def get_system_status_for_ui():
     """Get system status in Vue.js UI compatible format"""
@@ -3193,6 +3360,9 @@ def get_system_status_for_ui():
     
     # Get database status
     db_status = orchestrator.get_database_status()
+    
+    # Get cache stats
+    cache_stats_data = get_cache_stats()
     
     return jsonify({
         "status": "ready" if ollama_available else "degraded",
@@ -3222,13 +3392,15 @@ def get_system_status_for_ui():
             "vector_db_ttl": db_status["vector_db_ttl"]["connected"],
             "embedding_model": db_status["embedding_model"]["loaded"]
         },
+        "cache": cache_stats_data,  # NEW: Cache statistics
         "services": {
             "authentication": "configured" if oauth else "mock",
             "database": "connected" if cases_container_client else "disabled",
-            "storage": "connected" if blob_service_client else "disabled"
+            "storage": "connected" if blob_service_client else "disabled",
+            "cache": "enabled" if CACHE_ENABLED else "disabled"  # NEW
         },
-        "version": "5.0.0-integrated-database",
-        "system_name": "Integrated Database SAMM ASIST",
+        "version": "5.0.0-integrated-database-cached",  # Updated version
+        "system_name": "Integrated Database SAMM ASIST with Cache",  # Updated name
         "timestamp": datetime.now().isoformat()
     })
 
@@ -3716,6 +3888,10 @@ def health_check():
         database_status["vector_db_ttl"]["connected"]
     ])
     
+    # Get cache stats
+    cache_stats_data = get_cache_stats()
+    cache_healthy = CACHE_ENABLED and len(query_cache) >= 0  # Cache is working if enabled
+    
     return jsonify({
         "status": "healthy" if (ollama_healthy and agent_healthy) else "degraded",
         "timestamp": datetime.now().isoformat(),
@@ -3723,7 +3899,8 @@ def health_check():
         "ollama_healthy": ollama_healthy,
         "agents_healthy": agent_healthy,
         "database_healthy": database_healthy,
-        "version": "Integrated_Database_SAMM_v5.0",
+        "cache_healthy": cache_healthy,  # NEW
+        "version": "Integrated_Database_SAMM_v5.0_Cached",  # Updated
         "components": {
             "ollama": "healthy" if ollama_healthy else "degraded",
             "agents": "healthy" if agent_healthy else "degraded",
@@ -3733,8 +3910,10 @@ def health_check():
             "cosmos_gremlin": "healthy" if database_status["cosmos_gremlin"]["connected"] else "disconnected",
             "vector_db": "healthy" if database_status["vector_db"]["connected"] else "disconnected",
             "vector_db_ttl": "healthy" if database_status["vector_db_ttl"]["connected"] else "disconnected",
-            "embedding_model": "healthy" if database_status["embedding_model"]["loaded"] else "not_loaded"
-        }
+            "embedding_model": "healthy" if database_status["embedding_model"]["loaded"] else "not_loaded",
+            "cache": "healthy" if cache_healthy else "disabled"  # NEW
+        },
+        "cache_stats": cache_stats_data  # NEW: Include cache performance
     })
 
 # Static file serving

@@ -204,40 +204,25 @@ class ITARSecurityComplianceAgent:
         logger.info("ITAR Security Compliance Agent initialized")
     
     def _initialize_connections(self):
-        """Initialize database connections"""
+        """Initialize database connections - DISABLED FOR PERFORMANCE"""
+        # Skip database connections - compliance checking doesn't need them
+        # All compliance logic is rule-based and uses the knowledge base
+        logger.info("Database connections disabled for performance (not required for compliance)")
+        
+        # Set all to None explicitly
+        self.cosmos_gremlin_client = None
+        self.vector_db_client = None
+        self.vector_db_ttl_client = None
+        
+        # Load embedding model only if needed for future enhancements
         try:
-            # Initialize Cosmos DB Gremlin
-            if client and COSMOS_GREMLIN_CONFIG['password']:
-                username = f"/dbs/{COSMOS_GREMLIN_CONFIG['database']}/colls/{COSMOS_GREMLIN_CONFIG['graph']}"
-                endpoint_url = f"wss://{COSMOS_GREMLIN_CONFIG['endpoint']}:443/gremlin"
-                
-                self.cosmos_gremlin_client = client.Client(
-                    url=endpoint_url,
-                    traversal_source="g",
-                    username=username,
-                    password=COSMOS_GREMLIN_CONFIG['password'],
-                    message_serializer=serializer.GraphSONSerializersV2d0()
-                )
-                logger.info("Cosmos Gremlin connection established")
-            
-            # Initialize Vector DBs
-            if chromadb:
-                if Path(VECTOR_DB_PATH).exists():
-                    self.vector_db_client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
-                    logger.info("Vector DB connected")
-                
-                if Path(VECTOR_DB_TTL_PATH).exists():
-                    self.vector_db_ttl_client = chromadb.PersistentClient(path=VECTOR_DB_TTL_PATH)
-                    logger.info("Vector DB TTL connected")
-            
-            # Initialize embedding model
             if SentenceTransformer:
                 self.embedding_model = SentenceTransformer(EMBEDDING_MODEL)
                 logger.info("Embedding model loaded")
-                
         except Exception as e:
-            logger.error(f"Database initialization error: {e}")
-    
+            logger.error(f"Embedding model load error: {e}")
+            self.embedding_model = None   
+
     def _initialize_itar_categories(self) -> Dict[str, Dict]:
         """Initialize ITAR USML categories with detailed information"""
         return {
@@ -599,7 +584,13 @@ class ITARSecurityComplianceAgent:
         except Exception as e:
             logger.error(f"Compliance analysis error: {e}")
             analysis["error"] = str(e)
+   
+        # ✅ ADD THIS BEFORE THE RETURN - Convert enum to string for JSON serialization
+        if isinstance(analysis.get("required_auth_level"), AuthorizationLevel):
+            analysis["required_auth_level"] = analysis["required_auth_level"].value
         
+
+
         return analysis
     
     def _get_domain_indicators(self, domain: PolicyDomain) -> List[str]:
@@ -766,55 +757,55 @@ class ITARSecurityComplianceAgent:
         return risk_indicators
     
     async def _ai_enhanced_compliance_analysis(self, query: str, analysis: Dict) -> Dict[str, Any]:
-        """Use AI to enhance compliance analysis"""
-        system_msg = """You are an ITAR and export control compliance expert. Analyze the query for potential compliance issues.
-
-FOCUS AREAS:
-- ITAR (International Traffic in Arms Regulations) compliance
-- Export control restrictions
-- Technical data transfer concerns
-- Country-specific restrictions
-- Classification requirements
-
-RESPONSE FORMAT (JSON):
-{
-    "compliance_concerns": ["concern1", "concern2"],
-    "recommended_review_level": "standard|enhanced|legal_review",
-    "potential_violations": ["violation1", "violation2"],
-    "mitigation_suggestions": ["suggestion1", "suggestion2"]
-}"""
+        """Use AI to enhance compliance analysis - OPTIMIZED FOR SPEED"""
+        # Skip expensive AI analysis - use rule-based analysis instead for speed
+        # The compliance agent already does comprehensive rule-based checking
         
-        prompt = f"""Query: "{query}"
-
-Detected domains: {analysis.get('detected_domains', [])}
-ITAR categories: {analysis.get('itar_categories', [])}
-Sensitive terms: {analysis.get('sensitive_terms', [])}
-Country mentions: {analysis.get('country_mentions', [])}
-
-Provide compliance analysis:"""
+        compliance_concerns = []
+        recommended_review = "standard"
+        potential_violations = []
+        mitigation_suggestions = []
         
-        try:
-            response = call_ollama_enhanced(prompt, system_msg, temperature=0.1)
-            
-            # Try to parse JSON response
-            if "{" in response and "}" in response:
-                json_start = response.find("{")
-                json_end = response.rfind("}") + 1
-                json_part = response[json_start:json_end]
-                return json.loads(json_part)
-        except Exception as e:
-            logger.error(f"AI compliance analysis error: {e}")
+        # Quick rule-based analysis based on detected indicators
+        if analysis.get("itar_categories"):
+            compliance_concerns.append(f"ITAR USML categories detected: {', '.join(analysis['itar_categories'])}")
+            recommended_review = "enhanced"
         
-        # Fallback analysis
+        if analysis.get("sensitive_terms"):
+            compliance_concerns.append(f"Sensitive terms detected: {len(analysis['sensitive_terms'])} terms")
+            if len(analysis['sensitive_terms']) > 3:
+                recommended_review = "legal_review"
+        
+        if analysis.get("country_mentions"):
+            compliance_concerns.append("Country-specific restrictions may apply")
+            potential_violations.append("Verify country authorization requirements")
+        
+        if analysis.get("technical_data_indicators"):
+            compliance_concerns.append("Technical data transfer indicators detected")
+            mitigation_suggestions.append("Review ITAR technical data transfer requirements")
+        
+        if analysis.get("export_control_indicators"):
+            compliance_concerns.append("Export control indicators detected")
+            mitigation_suggestions.append("Verify export licensing requirements")
+        
+        if not compliance_concerns:
+            compliance_concerns.append("Standard compliance review recommended")
+        
+        if not mitigation_suggestions:
+            mitigation_suggestions.append("Consult compliance officer for guidance")
+        
+        logger.info(f"Fast rule-based compliance analysis complete: {recommended_review} review level")
+        
         return {
-            "compliance_concerns": ["Standard compliance review recommended"],
-            "recommended_review_level": "standard",
-            "potential_violations": [],
-            "mitigation_suggestions": ["Consult compliance officer for guidance"]
+            "compliance_concerns": compliance_concerns,
+            "recommended_review_level": recommended_review,
+            "potential_violations": potential_violations,
+            "mitigation_suggestions": mitigation_suggestions
         }
-    
+
+
     def _check_authorization_compliance(self, user_auth_level: AuthorizationLevel, 
-                                      compliance_analysis: Dict) -> Dict[str, Any]:
+                                    compliance_analysis: Dict) -> Dict[str, Any]:
         """Check if user authorization meets compliance requirements"""
         required_level = compliance_analysis["required_auth_level"]
         
@@ -832,15 +823,19 @@ Provide compliance analysis:"""
         
         authorized = user_level_value >= required_level_value
         
+        # Safely convert enum to string for JSON serialization
+        required_level_str = required_level.value if hasattr(required_level, 'value') else str(required_level)
+        
         return {
             "authorized": authorized,
             "user_level": user_auth_level.value,
-            "required_level": required_level.value,
+            "required_level": required_level_str,  # ← FIXED LINE
             "level_sufficient": authorized,
             "authorization_gap": max(0, required_level_value - user_level_value),
             "access_restrictions": self._get_access_restrictions(user_auth_level, compliance_analysis)
-        }
-    
+        }    
+
+
     def _get_access_restrictions(self, user_auth_level: AuthorizationLevel, 
                                 compliance_analysis: Dict) -> List[str]:
         """Get access restrictions based on authorization level"""

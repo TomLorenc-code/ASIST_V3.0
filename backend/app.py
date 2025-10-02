@@ -77,7 +77,7 @@ APP_SECRET_KEY = os.getenv("APP_SECRET_KEY", "DFd55vvJIcV79cGuEETrGc9HWiNDqducM7
 
 # Ollama Configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
 
 # Azure Storage Configuration
 COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")

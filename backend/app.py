@@ -74,8 +74,7 @@ AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID")
 AUTH0_CLIENT_SECRET = os.getenv("AUTH0_CLIENT_SECRET")
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN")
 APP_SECRET_KEY = os.getenv("APP_SECRET_KEY", "DFd55vvJIcV79cGuEETrGc9HWiNDqducM7upRwXdeJ9c4E3LbCtl")
-import logging
-logger = logging.getLogger(__name__)
+
 # Ollama Configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
@@ -136,39 +135,6 @@ else:
 blob_service_client = None
 case_docs_blob_container_client = None
 chat_docs_blob_container_client = None
-
-# ITAR Compliance Microservice Integration
-COMPLIANCE_SERVICE_URL = os.getenv("COMPLIANCE_SERVICE_URL", "http://localhost:3002")
-COMPLIANCE_SERVICE_ENABLED = os.getenv("COMPLIANCE_SERVICE_ENABLED", "true").lower() == "true"
-
-def call_compliance_service(query: str, intent_info: Dict, entity_info: Dict, 
-                           user_profile: Dict = None) -> Optional[Dict[str, Any]]:
-    """Call the ITAR compliance microservice"""
-    if not COMPLIANCE_SERVICE_ENABLED:
-        return None
-    
-    try:
-        data = {
-            "query": query,
-            "intent_info": intent_info,
-            "entity_info": entity_info,
-            "user_profile": user_profile or {}
-        }
-        
-        response = requests.post(
-            f"{COMPLIANCE_SERVICE_URL}/api/compliance/verify",
-            json=data,
-            timeout=10  # Short timeout to not block main request
-        )
-        response.raise_for_status()
-        return response.json()
-        
-    except requests.exceptions.Timeout:
-        logger.warning("Compliance service timeout")
-        return None
-    except Exception as e:
-        logger.error(f"Compliance service error: {e}")
-        return None
 
 def initialize_blob_container(bs_client, container_name_env_var, container_description):
     container_name = os.getenv(container_name_env_var)
@@ -1584,9 +1550,20 @@ Provide SAMM Chapter 1 context for this entity:"""
         print(f"[IntegratedEntityAgent Trigger] Updated with {len(new_entities)} new entities and {len(new_relationships)} relationships")
         print(f"[IntegratedEntityAgent Trigger] Total dynamic entities: {len(self.dynamic_knowledge['entities'])}")
         return True
+
 class EnhancedAnswerAgent:
     """
     Enhanced Answer Agent for SAMM Chapter 1 with sophisticated response generation
+    
+    Features:
+    - Windows compatibility and improved error handling
+    - Intent-optimized prompt engineering for each question type
+    - SAMM-specific response templates and quality standards
+    - Multi-pass answer generation with validation
+    - Learning system with HIL feedback and trigger updates
+    - Automatic answer enhancement (acronym expansion, section references)
+    - Answer caching and correction storage
+    - Quality scoring and confidence assessment
     """
     
     def __init__(self):
@@ -1594,13 +1571,13 @@ class EnhancedAnswerAgent:
         print("[EnhancedAnswerAgent] Initializing...")
         
         # Learning and feedback systems
-        self.hil_feedback_data = []
-        self.answer_templates = {}
-        self.trigger_updates = []
-        self.custom_knowledge = ""
-        self.answer_corrections = {}
+        self.hil_feedback_data = []        # Human-in-the-loop feedback storage
+        self.answer_templates = {}         # Intent-specific answer templates
+        self.trigger_updates = []          # Trigger-based updates storage
+        self.custom_knowledge = ""         # Additional knowledge from updates
+        self.answer_corrections = {}       # Stored answer corrections
         
-        # SAMM-specific response templates
+        # SAMM-specific response templates for each intent type
         self.samm_response_templates = {
             "definition": {
                 "structure": "Provide clear definition → cite SAMM section → add context/authority",
@@ -1634,7 +1611,7 @@ class EnhancedAnswerAgent:
             }
         }
         
-        # Quality enhancement patterns
+        # Quality enhancement patterns for post-processing
         self.quality_patterns = {
             "section_references": r"(C\d+\.\d+\.?\d*\.?\d*)",
             "acronym_detection": r"\b([A-Z]{2,})\b",
@@ -1642,7 +1619,7 @@ class EnhancedAnswerAgent:
             "incomplete_sentences": r"[a-z]\s*$"
         }
         
-        # Enhanced acronym expansion dictionary
+        # Enhanced acronym expansion dictionary for SAMM
         self.acronym_expansions = {
             "DSCA": "Defense Security Cooperation Agency (DSCA)",
             "DFAS": "Defense Finance and Accounting Service (DFAS)",
@@ -1658,7 +1635,13 @@ class EnhancedAnswerAgent:
             "MILDEP": "Military Department (MILDEP)",
             "IMET": "International Military Education and Training (IMET)",
             "FMS": "Foreign Military Sales (FMS)",
-            "FMF": "Foreign Military Financing (FMF)"
+            "FMF": "Foreign Military Financing (FMF)",
+            "NIPO": "Navy International Programs Office (NIPO)",
+            "USASAC": "U.S. Army Security Assistance Command (USASAC)",
+            "SATFA": "Security Assistance Training Field Activity (SATFA)",
+            "CCDR": "Combatant Commander (CCDR)",
+            "SCO": "Security Cooperation Organization (SCO)",
+            "GEF": "Guidance for Employment of the Force (GEF)"
         }
         
         # Answer quality scoring weights
@@ -1670,7 +1653,7 @@ class EnhancedAnswerAgent:
             "structure_adherence": 0.15
         }
         
-        # Response length guidelines
+        # Response length guidelines by intent
         self.length_guidelines = {
             "definition": {"min": 100, "target": 200, "max": 400},
             "distinction": {"min": 150, "target": 300, "max": 500},
@@ -1685,309 +1668,658 @@ class EnhancedAnswerAgent:
 
     @time_function
     def generate_answer(self, query: str, intent_info: Dict, entity_info: Dict, 
-                       chat_history: List = None, documents_context: List = None,
-                       compliance_result: Dict = None) -> str:
-        """Main method for enhanced answer generation with ITAR compliance integration"""
+                       chat_history: List = None, documents_context: List = None) -> str:
+        """
+        Main method for enhanced answer generation with improved error handling
+        """
         intent = intent_info.get("intent", "general")
         confidence = intent_info.get("confidence", 0.5)
         
         print(f"[Enhanced AnswerAgent] Generating answer for intent: {intent} (confidence: {confidence:.2f})")
         
-        # COMPLIANCE CHECK
-        if compliance_result:
-            compliance_status = compliance_result.get("compliance_status", "compliant")
-            authorized = compliance_result.get("authorized", True)
-            
-            print(f"[AnswerAgent] Compliance status: {compliance_status}, Authorized: {authorized}")
-            
-            if compliance_status == "non_compliant" or not authorized:
-                return self._generate_compliance_restricted_answer(query, compliance_result)
-            
-            if compliance_status == "requires_review":
-                return self._generate_compliance_review_answer(query, compliance_result)
-        
         try:
-            # Check for cached corrections
+            # Step 1: Check for existing corrections first
             cached_answer = self._check_for_corrections(query, intent_info, entity_info)
             if cached_answer:
                 print("[AnswerAgent] Using cached correction")
-                if compliance_result and compliance_result.get("compliance_status") == "warning":
-                    cached_answer = self._add_compliance_disclaimer(cached_answer, compliance_result)
                 return cached_answer
             
-            # Build context
+            # Step 2: Build comprehensive context from all sources
             context = self._build_comprehensive_context(
-                query, intent_info, entity_info, chat_history, documents_context,
-                compliance_result=compliance_result
+                query, intent_info, entity_info, chat_history, documents_context
             )
             
-            # Create system message
-            system_msg = self._create_optimized_system_message(
-                intent, context, compliance_result=compliance_result
-            )
+            # Step 3: Create intent-optimized system message
+            system_msg = self._create_optimized_system_message(intent, context)
             
-            # Create prompt
-            prompt = self._create_enhanced_prompt(
-                query, intent_info, entity_info, compliance_result=compliance_result
-            )
+            # Step 4: Generate enhanced prompt with intent awareness
+            prompt = self._create_enhanced_prompt(query, intent_info, entity_info)
             
-            # Generate answer
+            # Step 5: Generate answer with validation passes
             answer = self._generate_with_validation(prompt, system_msg, intent_info)
             
-            # Enhance quality
+            # Step 6: Apply post-processing enhancements
             enhanced_answer = self._enhance_answer_quality(answer, intent_info, entity_info)
             
-            # Apply compliance filtering
-            if compliance_result:
-                enhanced_answer = self._apply_compliance_filtering(enhanced_answer, compliance_result)
-            
-            # Final validation
+            # Step 7: Final validation and scoring
             final_answer = self._validate_and_score_answer(enhanced_answer, intent, query)
-            
-            # Add disclaimers
-            if compliance_result and compliance_result.get("content_guidance", {}).get("required_disclaimers"):
-                final_answer = self._add_compliance_disclaimer(final_answer, compliance_result)
             
             print(f"[AnswerAgent] Generated answer: {len(final_answer)} characters")
             return final_answer
             
         except Exception as e:
             print(f"[AnswerAgent] Error during answer generation: {e}")
-            return f"I apologize, but I encountered an error while generating the answer: {str(e)}"
-
-    def _generate_compliance_restricted_answer(self, query: str, compliance_result: Dict) -> str:
-        """Generate answer when compliance restrictions prevent full response"""
-        recommendations = compliance_result.get("recommendations", [])
-        compliance_status = compliance_result.get("compliance_status", "unknown")
-        required_auth = compliance_result.get("required_authorization_level", "unknown")
-        user_auth = compliance_result.get("user_authorization_level", "unclassified")
-        restrictions = compliance_result.get("restrictions", [])
-        
-        answer_parts = [
-            "I apologize, but I cannot provide a complete answer to this query due to security and compliance restrictions.",
-            ""
-        ]
-        
-        if compliance_status == "non_compliant":
-            answer_parts.append("**Compliance Status**: NON-COMPLIANT")
-            answer_parts.append("")
-            answer_parts.append("This query involves content that requires higher authorization levels or has export control restrictions.")
-        
-        if required_auth != user_auth:
-            answer_parts.append(f"**Authorization Required**: {required_auth.upper()}")
-            answer_parts.append(f"**Your Authorization Level**: {user_auth.upper()}")
-            answer_parts.append("")
-        
-        if restrictions:
-            answer_parts.append("**Specific Restrictions**:")
-            for restriction in restrictions:
-                answer_parts.append(f"- {restriction}")
-            answer_parts.append("")
-        
-        itar_compliance = compliance_result.get("itar_compliance", {})
-        if itar_compliance.get("usml_categories_detected"):
-            answer_parts.append("**ITAR Notice**: This query involves USML-controlled items:")
-            for category in itar_compliance["usml_categories_detected"]:
-                answer_parts.append(f"- Category {category}")
-            answer_parts.append("")
-        
-        if recommendations:
-            answer_parts.append("**Compliance Guidance**:")
-            for rec in recommendations:
-                answer_parts.append(f"- {rec}")
-            answer_parts.append("")
-        
-        answer_parts.append("**General Unclassified Information**:")
-        answer_parts.append("For unclassified general information about SAMM security cooperation policies, ")
-        answer_parts.append("please consult the public SAMM documentation or contact your security officer.")
-        
-        return "\n".join(answer_parts)
-
-    def _generate_compliance_review_answer(self, query: str, compliance_result: Dict) -> str:
-        """Generate answer when query requires manual compliance review"""
-        recommendations = compliance_result.get("recommendations", [])
-        itar_compliance = compliance_result.get("itar_compliance", {})
-        
-        answer_parts = [
-            "This query requires manual compliance review before a complete answer can be provided.",
-            ""
-        ]
-        
-        if itar_compliance.get("license_requirements"):
-            answer_parts.append("**Review Required**: ITAR export license implications detected")
-            answer_parts.append("")
-        
-        answer_parts.append("**Next Steps**:")
-        for rec in recommendations:
-            answer_parts.append(f"- {rec}")
-        
-        return "\n".join(answer_parts)
-
-    def _apply_compliance_filtering(self, answer: str, compliance_result: Dict) -> str:
-        """Apply compliance-based content filtering"""
-        try:
-            filtered_answer = answer
-            content_guidance = compliance_result.get("content_guidance", {})
-            
-            if content_guidance.get("sanitization_required", False):
-                print("[AnswerAgent] Applying compliance sanitization")
-                sensitive_patterns = [
-                    r'\b\d{3}-\d{2}-\d{4}\b',
-                    r'\bclassified\s+(?:technical|data|information)\b',
-                    r'\bexport\s+controlled\b',
-                ]
-                for pattern in sensitive_patterns:
-                    filtered_answer = re.sub(pattern, '[REDACTED]', filtered_answer, flags=re.IGNORECASE)
-            
-            detail_level = content_guidance.get("allowed_detail_level", "general")
-            if detail_level == "general" and len(filtered_answer) > 500:
-                filtered_answer = filtered_answer[:500] + "..."
-                filtered_answer += "\n\n[Response limited due to authorization level]"
-            
-            return filtered_answer
-        except Exception as e:
-            print(f"[AnswerAgent] Error applying compliance filtering: {e}")
-            return answer
-
-    def _add_compliance_disclaimer(self, answer: str, compliance_result: Dict) -> str:
-        """Add compliance disclaimers to the answer"""
-        try:
-            disclaimers = compliance_result.get("content_guidance", {}).get("required_disclaimers", [])
-            if not disclaimers:
-                return answer
-            
-            disclaimer_text = "\n\n---\n**Compliance Notice**:\n"
-            for disclaimer in disclaimers:
-                disclaimer_text += f"- {disclaimer}\n"
-            
-            return answer + disclaimer_text
-        except Exception as e:
-            print(f"[AnswerAgent] Error adding disclaimer: {e}")
-            return answer
-
+            return f"I apologize, but I encountered an error while generating the answer: {str(e)}. Please try rephrasing your question or check if the Ollama service is running."
+    
     def _check_for_corrections(self, query: str, intent_info: Dict, entity_info: Dict) -> Optional[str]:
         """Check if we have a stored correction for similar queries"""
         try:
             query_key = self._normalize_query_for_matching(query)
+            
+            # Check exact matches first
             if query_key in self.answer_corrections:
-                return self.answer_corrections[query_key]["corrected_answer"]
+                correction = self.answer_corrections[query_key]
+                print(f"[AnswerAgent] Found exact correction match")
+                return correction["corrected_answer"]
+            
+            # Check for partial matches based on intent and entities
+            current_entities = set(entity_info.get("entities", []))
+            current_intent = intent_info.get("intent", "general")
+            
+            for stored_key, correction in self.answer_corrections.items():
+                stored_entities = set(correction.get("feedback_data", {}).get("entities", []))
+                stored_intent = correction.get("feedback_data", {}).get("intent", "general")
+                
+                # If same intent and significant entity overlap (50% or more)
+                if (current_intent == stored_intent and len(current_entities) > 0 and
+                    len(current_entities.intersection(stored_entities)) >= min(len(current_entities), len(stored_entities)) * 0.5):
+                    print(f"[AnswerAgent] Found partial correction match based on intent/entities")
+                    return correction["corrected_answer"]
+            
             return None
+            
         except Exception as e:
             print(f"[AnswerAgent] Error checking corrections: {e}")
             return None
-
+    
     def _build_comprehensive_context(self, query: str, intent_info: Dict, entity_info: Dict,
-                                   chat_history: List = None, documents_context: List = None,
-                                   compliance_result: Dict = None) -> str:
-        """Build comprehensive context with compliance restrictions"""
+                                   chat_history: List = None, documents_context: List = None) -> str:
+        """Build comprehensive context for answer generation with error handling"""
         try:
             context_parts = []
             
-            # Add compliance guidance
-            if compliance_result:
-                content_guidance = compliance_result.get("content_guidance", {})
-                restrictions = compliance_result.get("restrictions", [])
-                detail_level = content_guidance.get("allowed_detail_level", "general")
-                
-                context_parts.append("=== COMPLIANCE RESTRICTIONS ===")
-                context_parts.append(f"Maximum detail level allowed: {detail_level.upper()}")
-                
-                if restrictions:
-                    context_parts.append("Content restrictions:")
-                    for restriction in restrictions:
-                        context_parts.append(f"- {restriction}")
-                context_parts.append("")
-            
-            # Add entity context
+            # Add entity context with confidence weighting
             if entity_info.get("context"):
                 context_parts.append("=== SAMM ENTITIES AND DEFINITIONS ===")
-                for ctx in entity_info["context"][:5]:
-                    if ctx.get('confidence', 0) > 0.6:
+                for ctx in entity_info["context"][:5]:  # Limit to 5 to prevent overload
+                    confidence = ctx.get('confidence', 0.5)
+                    if confidence > 0.6:  # Only include high-confidence entities
                         entity_text = f"{ctx.get('entity', '')}: {ctx.get('definition', '')}"
                         if ctx.get('section'):
                             entity_text += f" (SAMM {ctx['section']})"
                         context_parts.append(entity_text)
             
-            # Add text sections
+            # Add relevant text sections from SAMM
             if entity_info.get("text_sections"):
                 context_parts.append("\n=== SAMM CHAPTER 1 CONTENT ===")
-                for section in entity_info["text_sections"][:3]:
-                    context_parts.append(section[:500] + "..." if len(section) > 500 else section)
+                # Limit context to prevent overload
+                text_sections = entity_info["text_sections"][:3]
+                for section in text_sections:
+                    # Truncate very long sections
+                    truncated_section = section[:500] + "..." if len(section) > 500 else section
+                    context_parts.append(truncated_section)
             
-            # Add relationships
+            # Add entity relationships
             if entity_info.get("relationships"):
                 context_parts.append("\n=== ENTITY RELATIONSHIPS ===")
+                # Limit to most relevant relationships
                 context_parts.extend(entity_info["relationships"][:3])
             
+            # Add custom knowledge from HIL feedback and triggers
+            if self.custom_knowledge:
+                context_parts.append("\n=== ADDITIONAL KNOWLEDGE ===")
+                # Truncate if too long
+                knowledge = self.custom_knowledge[:1000] + "..." if len(self.custom_knowledge) > 1000 else self.custom_knowledge
+                context_parts.append(knowledge)
+            
+            # Add relevant chat history for continuity
+            if chat_history and len(chat_history) > 0:
+                context_parts.append("\n=== CONVERSATION CONTEXT ===")
+                for msg in chat_history[-2:]:  # Last 2 messages for context
+                    role = msg.get('role', 'unknown')
+                    content = msg.get('content', '')[:200]  # Truncate long messages
+                    context_parts.append(f"{role}: {content}")
+            
+            # Add document context if available
+            if documents_context:
+                context_parts.append("\n=== REFERENCED DOCUMENTS ===")
+                for doc in documents_context[:3]:  # Limit to 3 documents
+                    context_parts.append(f"- {doc.get('fileName', 'Unknown file')}")
+            
             return "\n".join(context_parts)
+            
         except Exception as e:
             print(f"[AnswerAgent] Error building context: {e}")
-            return "Context building failed"
+            return "Context building failed - proceeding with basic knowledge."
+    
+    def _create_optimized_system_message(self, intent: str, context: str) -> str:
+        """Create intent-optimized system message for Llama 3.2 with error handling"""
+        
+        try:
+            # Base instructions for each intent type
+            base_instructions = {
+                "definition": """You are a SAMM (Security Assistance Management Manual) expert specializing in precise definitions.
 
-    def _create_optimized_system_message(self, intent: str, context: str, 
-                                        compliance_result: Dict = None) -> str:
-        """Create intent-optimized system message with compliance"""
-        base_msg = "You are a SAMM expert. Provide accurate information about Security Cooperation and Security Assistance."
-        
-        if compliance_result:
-            detail_level = compliance_result.get("content_guidance", {}).get("allowed_detail_level", "general")
-            base_msg += f"\n\nCOMPLIANCE: Maximum detail level is {detail_level.upper()}. "
-            base_msg += "Provide only unclassified, general information."
-        
-        base_msg += f"\n\nCONTEXT:\n{context[:2000]}"
-        return base_msg
+TASK: Provide authoritative definitions with exact SAMM section citations.
 
-    def _create_enhanced_prompt(self, query: str, intent_info: Dict, entity_info: Dict,
-                               compliance_result: Dict = None) -> str:
-        """Create enhanced prompt with compliance awareness"""
-        prompt = f"Question: {query}\n"
-        
-        if compliance_result:
-            detail_level = compliance_result.get("content_guidance", {}).get("allowed_detail_level", "general")
-            prompt += f"IMPORTANT: Respond at {detail_level.upper()} detail level only.\n"
-        
-        prompt += "Provide a comprehensive answer based on SAMM Chapter 1."
-        return prompt
+CRITICAL REQUIREMENTS:
+- Use exact SAMM terminology and definitions from the context
+- Always cite specific SAMM sections (e.g., "SAMM C1.3.2.2")
+- Expand acronyms on first use (e.g., "Defense Security Cooperation Agency (DSCA)")
+- Distinguish between Security Cooperation and Security Assistance
+- Remember: SA is a SUBSET of SC, not the same thing
+- Provide clear, complete definitions that could stand alone
 
+RESPONSE STRUCTURE:
+1. Clear definition statement
+2. SAMM section citation
+3. Additional context about authority/oversight if relevant""",
+
+                "distinction": """You are a SAMM expert specializing in explaining key distinctions and differences.
+
+TASK: Clearly explain differences between SAMM concepts with precise legal and operational distinctions.
+
+CRITICAL REQUIREMENTS:
+- Highlight key differences clearly and systematically
+- Explain legal authority differences (Title 10 vs Title 22)
+- Use specific examples when possible
+- Always emphasize that Security Assistance is a subset of Security Cooperation
+- Cite relevant SAMM sections for each concept being compared
+- Address common misconceptions
+
+RESPONSE STRUCTURE:
+1. State the key distinction clearly
+2. Explain each concept separately with citations
+3. Highlight the differences with examples
+4. Summarize the relationship""",
+
+                "authority": """You are a SAMM expert specializing in authority and oversight structures.
+
+TASK: Explain who has authority, oversight, and responsibility for specific programs.
+
+CRITICAL REQUIREMENTS:
+- Clearly state which organization/person has authority
+- Explain the scope of authority and oversight
+- Cite legal authorities (FAA, AECA, NDAA, Executive Orders)
+- Distinguish between "supervision," "direction," and "oversight"
+- Reference specific SAMM sections
+- Explain delegation chains where applicable
+
+RESPONSE STRUCTURE:
+1. State who has the authority
+2. Explain the scope and basis of authority
+3. Cite legal foundations
+4. Describe any delegation or coordination requirements""",
+
+                "organization": """You are a SAMM expert specializing in organizational roles and responsibilities.
+
+TASK: Describe organizations, their roles, and specific responsibilities.
+
+CRITICAL REQUIREMENTS:
+- Provide full organization names and acronyms
+- List specific roles and responsibilities clearly
+- Explain relationships between organizations
+- Cite relevant SAMM sections
+- Include key personnel authorities where applicable
+- Describe organizational structure and reporting relationships
+
+RESPONSE STRUCTURE:
+1. Full name and acronym
+2. Primary role and mission
+3. Specific responsibilities
+4. Reporting relationships and coordination""",
+
+                "factual": """You are a SAMM expert providing specific factual information.
+
+TASK: Provide accurate, specific facts from SAMM Chapter 1.
+
+CRITICAL REQUIREMENTS:
+- Provide precise, accurate information
+- Include dates, numbers, and specific details
+- Cite SAMM sections for verification
+- Use exact terminology from SAMM
+- Expand acronyms appropriately
+
+RESPONSE STRUCTURE:
+1. Direct answer to the factual question
+2. Supporting context
+3. Source citation""",
+
+                "relationship": """You are a SAMM expert explaining relationships between entities and concepts.
+
+TASK: Describe how SAMM entities, programs, and authorities relate to each other.
+
+CRITICAL REQUIREMENTS:
+- Clearly explain the nature of relationships
+- Use specific examples to illustrate connections
+- Cite relevant authorities and SAMM sections
+- Explain the significance of relationships
+- Address coordination and oversight aspects
+
+RESPONSE STRUCTURE:
+1. Describe the relationship clearly
+2. Explain why the relationship exists
+3. Provide examples of how it works in practice
+4. Cite supporting authorities""",
+
+                "general": """You are a SAMM (Security Assistance Management Manual) Chapter 1 expert.
+
+TASK: Provide comprehensive, accurate information about Security Cooperation and Security Assistance.
+
+CRITICAL REQUIREMENTS:
+- Use exact SAMM terminology from the provided context
+- Always cite SAMM sections when available
+- Expand acronyms on first use
+- Maintain distinction between SC and SA (SA is subset of SC)
+- Provide authoritative, accurate information
+- Structure responses logically and completely"""
+            }
+            
+            system_msg = base_instructions.get(intent, base_instructions["general"])
+            
+            # Add learned improvements from HIL feedback
+            if intent in self.answer_templates and self.answer_templates[intent]:
+                system_msg += "\n\nIMPORTANT IMPROVEMENTS FROM FEEDBACK:"
+                for template in self.answer_templates[intent][-2:]:  # Last 2 templates
+                    if template.get("improvement_notes"):
+                        system_msg += f"\n- {template['improvement_notes']}"
+                    if template.get("key_points"):
+                        system_msg += f"\n- Ensure to mention: {', '.join(template['key_points'])}"
+            
+            # Add template structure guidance
+            if intent in self.samm_response_templates:
+                template = self.samm_response_templates[intent]
+                system_msg += f"\n\nRESPONSE STRUCTURE: {template['structure']}"
+                system_msg += f"\nREQUIRED ELEMENTS: {', '.join(template['required_elements'])}"
+                system_msg += f"\nQUALITY CRITERIA: {', '.join(template['quality_criteria'])}"
+            
+            # Add length guidelines
+            if intent in self.length_guidelines:
+                guidelines = self.length_guidelines[intent]
+                system_msg += f"\n\nLENGTH GUIDELINES: Target {guidelines['target']} characters (minimum {guidelines['min']}, maximum {guidelines['max']})"
+            
+            # Add context (truncated if necessary)
+            context_truncated = context[:2000] + "..." if len(context) > 2000 else context
+            system_msg += f"\n\nCONTEXT FROM SAMM:\n{context_truncated}"
+            
+            return system_msg
+            
+        except Exception as e:
+            print(f"[AnswerAgent] Error creating system message: {e}")
+            return "You are a SAMM expert. Provide accurate information about Security Cooperation and Security Assistance."
+    
+    def _create_enhanced_prompt(self, query: str, intent_info: Dict, entity_info: Dict) -> str:
+        """Create enhanced prompt with entity and intent awareness"""
+        try:
+            intent = intent_info.get("intent", "general")
+            entities = entity_info.get("entities", [])
+            confidence = intent_info.get("confidence", 0.5)
+            
+            prompt_parts = []
+            
+            # Add query with context
+            prompt_parts.append(f"Question: {query}")
+            
+            # Add intent guidance if high confidence
+            if confidence > 0.7:
+                prompt_parts.append(f"This is a {intent} question requiring a {intent}-focused response.")
+            
+            # Add entity awareness (limit to prevent overload)
+            if entities:
+                limited_entities = entities[:3]  # Limit to 3 entities
+                prompt_parts.append(f"Key entities mentioned: {', '.join(limited_entities)}")
+            
+            # Add specific instructions based on intent
+            intent_instructions = {
+                "definition": "Provide a complete, authoritative definition with proper SAMM section reference.",
+                "distinction": "Explain the key differences clearly with specific examples and legal basis.",
+                "authority": "Explain who has authority, the scope of that authority, and the legal basis.",
+                "organization": "Describe the organization's full name, role, and specific responsibilities.",
+                "factual": "Provide the specific factual information with proper context and citation.",
+                "relationship": "Describe how the entities relate to each other and why this matters."
+            }
+            
+            if intent in intent_instructions:
+                prompt_parts.append(intent_instructions[intent])
+            
+            prompt_parts.append("Provide a comprehensive, accurate answer based on SAMM Chapter 1 content.")
+            
+            return "\n".join(prompt_parts)
+            
+        except Exception as e:
+            print(f"[AnswerAgent] Error creating prompt: {e}")
+            return f"Question: {query}\nProvide a comprehensive answer based on SAMM Chapter 1."
+    
     def _generate_with_validation(self, prompt: str, system_msg: str, intent_info: Dict) -> str:
-        """Generate answer with validation"""
-        return call_ollama_enhanced(prompt, system_msg, temperature=0.1)
-
+        """Generate answer with multiple validation passes and improved error handling"""
+        intent = intent_info.get("intent", "general")
+        
+        try:
+            # First generation pass
+            print("[AnswerAgent] First generation pass...")
+            initial_answer = call_ollama_enhanced(prompt, system_msg, temperature=0.1)
+            
+            # Check if answer indicates an error
+            if "Error" in initial_answer and len(initial_answer) < 100:
+                return initial_answer  # Return error as-is
+            
+            # Validate answer quality
+            validation_results = self._validate_answer_quality(initial_answer, intent)
+            
+            # If answer needs improvement, try enhanced generation
+            if validation_results["needs_improvement"] and len(validation_results["issues"]) > 10:  # Don't retry if too many issues
+                print(f"[AnswerAgent] Answer needs improvement: {validation_results['issues']}")
+                
+                # Create enhanced prompt with specific improvement requests
+                improvement_prompt = f"{prompt}\n\nIMPROVEMENT NEEDED: {', '.join(validation_results['issues'])}\n\nPlease provide a better response addressing these issues."
+                
+                print("[AnswerAgent] Second generation pass with improvements...")
+                improved_answer = call_ollama_enhanced(improvement_prompt, system_msg, temperature=0.2)
+                
+                # Use improved answer if it's actually better and doesn't contain errors
+                if (len(improved_answer) > len(initial_answer) * 1.1 and 
+                    "Error" not in improved_answer and
+                    len(improved_answer) > 50):  # At least 10% longer and valid
+                    return improved_answer
+            
+            return initial_answer
+            
+        except Exception as e:
+            print(f"[AnswerAgent] Error during generation with validation: {e}")
+            return f"I apologize, but I encountered an error while generating the answer: {str(e)}"
+    
     def _validate_answer_quality(self, answer: str, intent: str) -> Dict[str, Any]:
-        """Validate answer quality"""
-        return {"needs_improvement": False, "issues": [], "length": len(answer)}
-
+        """Validate answer quality against SAMM standards with error handling"""
+        try:
+            issues = []
+            needs_improvement = False
+            
+            # Skip validation if answer is too short (likely an error)
+            if len(answer) < 20:
+                return {"needs_improvement": False, "issues": ["answer_too_short"], "length": len(answer)}
+            
+            # Check length guidelines
+            if intent in self.length_guidelines:
+                guidelines = self.length_guidelines[intent]
+                if len(answer) < guidelines["min"]:
+                    issues.append("too short")
+                    needs_improvement = True
+                elif len(answer) > guidelines["max"]:
+                    issues.append("too long")
+            
+            # Check for SAMM section references
+            if not re.search(self.quality_patterns["section_references"], answer):
+                issues.append("missing SAMM section reference")
+                needs_improvement = True
+            
+            # Check for incomplete sentences
+            if re.search(self.quality_patterns["incomplete_sentences"], answer):
+                issues.append("incomplete sentences")
+                needs_improvement = True
+            
+            # Intent-specific validations
+            if intent == "definition" and "definition" not in answer.lower():
+                issues.append("missing clear definition")
+                needs_improvement = True
+            
+            if intent == "distinction" and not any(word in answer.lower() for word in ["difference", "differ", "distinction", "versus", "vs"]):
+                issues.append("missing comparison language")
+                needs_improvement = True
+            
+            if intent == "authority" and not any(word in answer.lower() for word in ["authority", "responsible", "oversight", "supervision"]):
+                issues.append("missing authority language")
+                needs_improvement = True
+            
+            return {
+                "needs_improvement": needs_improvement,
+                "issues": issues,
+                "length": len(answer)
+            }
+            
+        except Exception as e:
+            print(f"[AnswerAgent] Error validating answer quality: {e}")
+            return {"needs_improvement": False, "issues": [], "length": len(answer)}
+    
     def _enhance_answer_quality(self, answer: str, intent_info: Dict, entity_info: Dict) -> str:
-        """Apply post-processing enhancements"""
-        return answer
-
+        """Apply post-processing enhancements with error handling"""
+        try:
+            enhanced_answer = answer
+            
+            # Skip enhancement if answer is too short or contains errors
+            if len(answer) < 20 or "Error" in answer:
+                return answer
+            
+            # Step 1: Add section references if missing critical ones
+            if not re.search(self.quality_patterns["section_references"], enhanced_answer):
+                entities = entity_info.get("entities", [])
+                if entities and any(entity in ["DSCA", "Security Assistance", "Security Cooperation"] for entity in entities):
+                    enhanced_answer += "\n\nRefer to relevant SAMM Chapter 1 sections for complete details."
+            
+            # Step 2: Expand acronyms that appear without expansion (limit to prevent overprocessing)
+            acronyms_found = re.findall(self.quality_patterns["acronym_detection"], enhanced_answer)
+            
+            for acronym in list(set(acronyms_found))[:5]:  # Limit to 5 acronyms
+                if (acronym in self.acronym_expansions and 
+                    acronym in enhanced_answer and 
+                    self.acronym_expansions[acronym] not in enhanced_answer):
+                    # Only expand the first occurrence
+                    enhanced_answer = enhanced_answer.replace(acronym, self.acronym_expansions[acronym], 1)
+            
+            # Step 3: Ensure proper SAMM terminology
+            terminology_fixes = {
+                "security cooperation": "Security Cooperation",
+                "security assistance": "Security Assistance", 
+                "foreign assistance act": "Foreign Assistance Act",
+                "arms export control act": "Arms Export Control Act"
+            }
+            
+            for incorrect, correct in terminology_fixes.items():
+                if incorrect in enhanced_answer and correct not in enhanced_answer:
+                    enhanced_answer = enhanced_answer.replace(incorrect, correct)
+            
+            # Step 4: Add intent-specific enhancements
+            intent = intent_info.get("intent", "general")
+            
+            if intent == "distinction" and "subset" not in enhanced_answer.lower():
+                if "Security Assistance" in enhanced_answer and "Security Cooperation" in enhanced_answer:
+                    enhanced_answer += "\n\nRemember: Security Assistance is a subset of Security Cooperation."
+            
+            return enhanced_answer
+            
+        except Exception as e:
+            print(f"[AnswerAgent] Error enhancing answer quality: {e}")
+            return answer  # Return original if enhancement fails
+    
     def _validate_and_score_answer(self, answer: str, intent: str, query: str) -> str:
-        """Final validation and scoring"""
-        return answer
-
+        """Final validation and quality scoring of the answer with error handling"""
+        try:
+            # Skip scoring if answer is too short or contains errors
+            if len(answer) < 20 or "Error" in answer:
+                return answer
+            
+            # Calculate quality score
+            score = self._calculate_quality_score(answer, intent)
+            
+            # Log quality metrics
+            print(f"[AnswerAgent] Answer quality score: {score:.2f}/1.0")
+            
+            # If score is too low, add disclaimer
+            if score < 0.6:
+                print(f"[AnswerAgent] Low quality score, adding disclaimer")
+                answer += "\n\nNote: For complete and authoritative information, please refer to the full SAMM Chapter 1 documentation."
+            
+            return answer
+            
+        except Exception as e:
+            print(f"[AnswerAgent] Error in final validation: {e}")
+            return answer  # Return original if validation fails
+    
     def _calculate_quality_score(self, answer: str, intent: str) -> float:
-        """Calculate quality score"""
-        return 0.75
-
+        """Calculate quality score based on SAMM standards with error handling"""
+        try:
+            score = 0.0
+            
+            # Section citation score
+            if re.search(self.quality_patterns["section_references"], answer):
+                score += self.quality_weights["section_citation"]
+            
+            # Acronym expansion score
+            acronyms_found = re.findall(self.quality_patterns["acronym_detection"], answer)
+            if acronyms_found:
+                expanded_count = sum(1 for acronym in acronyms_found if f"{acronym})" in answer)
+                score += self.quality_weights["acronym_expansion"] * (expanded_count / len(set(acronyms_found)))
+            
+            # Answer completeness score (based on length guidelines)
+            if intent in self.length_guidelines:
+                guidelines = self.length_guidelines[intent]
+                if guidelines["min"] <= len(answer) <= guidelines["max"]:
+                    score += self.quality_weights["answer_completeness"]
+                elif len(answer) >= guidelines["target"]:
+                    score += self.quality_weights["answer_completeness"] * 0.8
+            
+            # SAMM terminology score
+            samm_terms = ["Security Cooperation", "Security Assistance", "SAMM", "Title 10", "Title 22"]
+            terms_used = sum(1 for term in samm_terms if term in answer)
+            if terms_used > 0:
+                score += self.quality_weights["samm_terminology"] * min(1.0, terms_used / 3)
+            
+            # Structure adherence score
+            if intent in self.samm_response_templates:
+                required_elements = self.samm_response_templates[intent]["required_elements"]
+                elements_present = 0
+                for element in required_elements:
+                    element_keywords = element.replace("_", " ").split()
+                    if any(keyword in answer.lower() for keyword in element_keywords):
+                        elements_present += 1
+                
+                if required_elements:
+                    score += self.quality_weights["structure_adherence"] * (elements_present / len(required_elements))
+            
+            return min(1.0, score)  # Cap at 1.0
+            
+        except Exception as e:
+            print(f"[AnswerAgent] Error calculating quality score: {e}")
+            return 0.5  # Return moderate score on error
+    
     def _normalize_query_for_matching(self, query: str) -> str:
-        """Normalize query for matching"""
-        return query.lower().strip()
-
+        """Normalize query for matching similar questions"""
+        try:
+            # Simple normalization - remove punctuation, lowercase, sort words
+            words = re.findall(r'\b\w+\b', query.lower())
+            # Keep only significant words (length > 2)
+            significant_words = [word for word in words if len(word) > 2]
+            return " ".join(sorted(significant_words))
+        except Exception as e:
+            print(f"[AnswerAgent] Error normalizing query: {e}")
+            return query.lower()
+    
     def update_from_hil(self, query: str, original_answer: str, corrected_answer: str, 
                         feedback_data: Dict[str, Any] = None):
-        """Update from HIL feedback"""
-        query_key = self._normalize_query_for_matching(query)
-        self.answer_corrections[query_key] = {
-            "corrected_answer": corrected_answer,
-            "feedback_data": feedback_data
-        }
-        return True
-
+        """Update agent based on human-in-the-loop feedback with improved error handling"""
+        try:
+            feedback_entry = {
+                "query": query,
+                "original_answer": original_answer,
+                "corrected_answer": corrected_answer,
+                "feedback_data": feedback_data or {},
+                "timestamp": datetime.now().isoformat(),
+                "improvement_type": "hil_correction"
+            }
+            
+            self.hil_feedback_data.append(feedback_entry)
+            
+            # Store the correction for future similar queries
+            query_key = self._normalize_query_for_matching(query)
+            self.answer_corrections[query_key] = {
+                "corrected_answer": corrected_answer,
+                "feedback_data": feedback_data,
+                "original_query": query,
+                "correction_date": datetime.now().isoformat()
+            }
+            
+            # Extract and store improved patterns
+            if feedback_data:
+                intent = feedback_data.get("intent", "general")
+                if intent not in self.answer_templates:
+                    self.answer_templates[intent] = []
+                
+                # Store template patterns from corrections
+                template_info = {
+                    "query_pattern": query.lower(),
+                    "improvement_notes": feedback_data.get("improvement_notes", ""),
+                    "key_points": feedback_data.get("key_points", []),
+                    "structure_notes": feedback_data.get("structure_notes", ""),
+                    "feedback_date": datetime.now().isoformat()
+                }
+                self.answer_templates[intent].append(template_info)
+            
+            # Add any new knowledge provided in feedback
+            if feedback_data and feedback_data.get("additional_knowledge"):
+                self.custom_knowledge += f"\n\nHIL Update ({datetime.now().strftime('%Y-%m-%d')}):\n{feedback_data['additional_knowledge']}"
+            
+            print(f"[AnswerAgent HIL] Updated with correction for query: '{query[:50]}...'")
+            print(f"[AnswerAgent HIL] Total corrections stored: {len(self.answer_corrections)}")
+            return True
+            
+        except Exception as e:
+            print(f"[AnswerAgent] Error updating from HIL feedback: {e}")
+            return False
+    
     def update_from_trigger(self, new_entities: List[str], new_relationships: List[Dict], 
                            trigger_data: Dict[str, Any] = None):
-        """Update from trigger"""
-        return True
-    
+        """Update agent when new entity/relationship data is available with error handling"""
+        try:
+            trigger_entry = {
+                "new_entities": new_entities,
+                "new_relationships": new_relationships,
+                "trigger_data": trigger_data or {},
+                "timestamp": datetime.now().isoformat(),
+                "trigger_id": len(self.trigger_updates)
+            }
+            
+            self.trigger_updates.append(trigger_entry)
+            
+            # Add new knowledge from trigger updates
+            if trigger_data:
+                new_knowledge_items = []
+                
+                # Add entity definitions
+                for entity in new_entities:
+                    definition = trigger_data.get("entity_definitions", {}).get(entity)
+                    if definition:
+                        new_knowledge_items.append(f"{entity}: {definition}")
+                
+                # Add relationship information
+                for rel in new_relationships:
+                    rel_info = f"{rel.get('source', '')} {rel.get('relationship', '')} {rel.get('target', '')}"
+                    details = trigger_data.get("relationship_details", {}).get(rel_info)
+                    if details:
+                        new_knowledge_items.append(f"Relationship: {rel_info} - {details}")
+                
+                # Add any general knowledge updates
+                if trigger_data.get("knowledge_updates"):
+                    new_knowledge_items.extend(trigger_data["knowledge_updates"])
+                
+                if new_knowledge_items:
+                    self.custom_knowledge += f"\n\nTrigger Update ({datetime.now().strftime('%Y-%m-%d')}):\n" + "\n".join(new_knowledge_items)
+            
+            print(f"[AnswerAgent Trigger] Updated with {len(new_entities)} new entities and {len(new_relationships)} relationships")
+            print(f"[AnswerAgent Trigger] Total trigger updates: {len(self.trigger_updates)}")
+            return True
+            
+        except Exception as e:
+            print(f"[AnswerAgent] Error updating from trigger: {e}")
+            return False
 
 class SimpleStateOrchestrator:
     """Simple LangGraph-style state orchestration for integrated SAMM agents with HIL and trigger updates"""
@@ -2016,11 +2348,10 @@ class SimpleStateOrchestrator:
             WorkflowStep.COMPLETE: None,
             WorkflowStep.ERROR: None
         }
-
     @time_function
-    def process_query(self, query: str, chat_history: List = None, documents_context: List = None,
-                     user_profile: Dict = None) -> Dict[str, Any]:
-        """Process query with integrated compliance checking"""
+    def process_query(self, query: str, chat_history: List = None, documents_context: List = None) -> Dict[str, Any]:
+        """Process query through integrated state orchestrated workflow"""
+        # Initialize state
         state = AgentState(
             query=query,
             chat_history=chat_history,
@@ -2035,48 +2366,24 @@ class SimpleStateOrchestrator:
         )
         
         try:
+            # Execute workflow
             current_step = WorkflowStep.INIT
             
-            while current_step is not None and current_step != WorkflowStep.ANSWER:
+            while current_step is not None:
                 print(f"[State Orchestrator] Executing step: {current_step.value}")
                 state['current_step'] = current_step.value
                 state['execution_steps'].append(f"Step: {current_step.value}")
                 
+                # Execute step
                 state = self.workflow[current_step](state)
                 
+                # Check for error
                 if state.get('error'):
                     current_step = WorkflowStep.ERROR
                 else:
+                    # Move to next step
                     current_step = self.transitions[current_step]
             
-            compliance_result = None
-            if COMPLIANCE_SERVICE_ENABLED and state['intent_info'] and state['entity_info']:
-                state['execution_steps'].append("Checking ITAR/Security compliance...")
-                compliance_result = call_compliance_service(
-                    query=state['query'],
-                    intent_info=state['intent_info'],
-                    entity_info=state['entity_info'],
-                    user_profile=user_profile
-                )
-                
-                if compliance_result:
-                    compliance_status = compliance_result.get('compliance_status', 'unknown')
-                    state['execution_steps'].append(f"Compliance check: {compliance_status}")
-                    print(f"[State Orchestrator] Compliance: {compliance_status}")
-            
-            if current_step == WorkflowStep.ANSWER:
-                state['answer'] = self.answer_agent.generate_answer(
-                    state['query'],
-                    state['intent_info'],
-                    state['entity_info'],
-                    state['chat_history'],
-                    state['documents_context'],
-                    compliance_result=compliance_result
-                )
-                state['execution_steps'].append("Answer generated with compliance verification")
-                current_step = WorkflowStep.COMPLETE
-            
-            state = self.workflow[WorkflowStep.COMPLETE](state)
             execution_time = round(time.time() - state['start_time'], 2)
             
             return {
@@ -2087,21 +2394,34 @@ class SimpleStateOrchestrator:
                 "execution_time": execution_time,
                 "execution_steps": state['execution_steps'],
                 "success": state['error'] is None,
-                "compliance_result": compliance_result,
                 "metadata": {
                     "intent_confidence": state['intent_info'].get('confidence', 0) if state['intent_info'] else 0,
                     "entities": state['entity_info'].get('entities', []) if state['entity_info'] else [],
-                    "system_version": "Integrated_Database_SAMM_v5.0_Compliance",
+                    "system_version": "Integrated_Database_SAMM_v5.0",
                     "workflow_completed": state['current_step'] == 'complete',
+                    # Keep legacy metadata structure for Vue.js compatibility
+                    "intent": state['intent_info'].get('intent', 'unknown') if state['intent_info'] else 'unknown',
+                    "entities_found": len(state['entity_info'].get('entities', [])) if state['entity_info'] else 0,
+                    "execution_time_seconds": execution_time,
+                    # Add database integration status
                     "database_integration": {
                         "cosmos_gremlin": db_manager.cosmos_gremlin_client is not None,
                         "vector_db": db_manager.vector_db_client is not None,
                         "vector_db_ttl": db_manager.vector_db_ttl_client is not None,
                         "embedding_model": db_manager.embedding_model is not None
                     },
-                    "compliance_checked": compliance_result is not None,
-                    "compliance_status": compliance_result.get('compliance_status') if compliance_result else None,
-                    "compliance_authorized": compliance_result.get('authorized') if compliance_result else True
+                    # Add HIL and trigger update status
+                    "hil_updates_available": (len(self.intent_agent.hil_feedback_data) > 0 or 
+                                            len(self.entity_agent.hil_feedback_data) > 0 or 
+                                            len(self.answer_agent.hil_feedback_data) > 0),
+                    "trigger_updates_available": (len(self.intent_agent.trigger_updates) > 0 or 
+                                                len(self.entity_agent.trigger_updates) > 0 or 
+                                                len(self.answer_agent.trigger_updates) > 0),
+                    # Enhanced entity agent status
+                    "entity_extraction_method": state['entity_info'].get('extraction_method', 'unknown') if state['entity_info'] else 'unknown',
+                    "entity_confidence": state['entity_info'].get('overall_confidence', 0) if state['entity_info'] else 0,
+                    "extraction_phases": state['entity_info'].get('phase_count', 0) if state['entity_info'] else 0,
+                    "total_database_results": state['entity_info'].get('total_results', 0) if state['entity_info'] else 0
                 }
             }
             
@@ -2109,20 +2429,20 @@ class SimpleStateOrchestrator:
             execution_time = round(time.time() - state['start_time'], 2)
             return {
                 "query": query,
-                "answer": f"I apologize, but I encountered an error during processing: {str(e)}",
+                "answer": f"I apologize, but I encountered an error during integrated processing: {str(e)}",
                 "intent": "error",
                 "entities_found": 0,
                 "execution_time": execution_time,
                 "execution_steps": state['execution_steps'] + [f"Error: {str(e)}"],
                 "success": False,
-                "compliance_result": None,
-                "metadata": {"error": str(e), "system_version": "Integrated_Database_SAMM_v5.0_Compliance"}
+                "metadata": {"error": str(e), "system_version": "Integrated_Database_SAMM_v5.0"}
             }
     
     def update_agents_from_hil(self, query: str, intent_correction: Dict = None, entity_correction: Dict = None, answer_correction: Dict = None) -> Dict[str, bool]:
         """Update all agents from human-in-the-loop feedback"""
         results = {}
         
+        # Update Intent Agent
         if intent_correction:
             results["intent"] = self.intent_agent.update_from_hil(
                 query=query,
@@ -2131,6 +2451,7 @@ class SimpleStateOrchestrator:
                 feedback_data=intent_correction.get("feedback_data", {})
             )
         
+        # Update Integrated Entity Agent
         if entity_correction:
             results["entity"] = self.entity_agent.update_from_hil(
                 query=query,
@@ -2139,6 +2460,7 @@ class SimpleStateOrchestrator:
                 feedback_data=entity_correction.get("feedback_data", {})
             )
         
+        # Update Enhanced Answer Agent
         if answer_correction:
             results["answer"] = self.answer_agent.update_from_hil(
                 query=query,
@@ -2154,18 +2476,21 @@ class SimpleStateOrchestrator:
         """Update all agents when new entity/relationship data is available"""
         results = {}
         
+        # Update Intent Agent
         results["intent"] = self.intent_agent.update_from_trigger(
             new_entities=new_entities,
             new_relationships=new_relationships,
             trigger_data=trigger_data
         )
         
+        # Update Integrated Entity Agent
         results["entity"] = self.entity_agent.update_from_trigger(
             new_entities=new_entities,
             new_relationships=new_relationships,
             trigger_data=trigger_data
         )
         
+        # Update Enhanced Answer Agent
         results["answer"] = self.answer_agent.update_from_trigger(
             new_entities=new_entities,
             new_relationships=new_relationships,
@@ -2190,7 +2515,7 @@ class SimpleStateOrchestrator:
                 "custom_entities": len(self.entity_agent.custom_entities),
                 "dynamic_entities": len(self.entity_agent.dynamic_knowledge["entities"]),
                 "samm_patterns": sum(len(patterns) for patterns in self.entity_agent.samm_entity_patterns.values()),
-                "extraction_phases": 3,
+                "extraction_phases": 3,  # pattern_matching, nlp_extraction, database_queries
                 "database_status": db_manager.get_database_status()
             },
             "enhanced_answer_agent": {
@@ -2221,6 +2546,7 @@ class SimpleStateOrchestrator:
         state['execution_steps'].append("Integrated workflow initialized with database connections")
         print(f"[State Orchestrator] Initialized query: '{state['query']}'")
         return state
+    
     
     def _analyze_intent_step(self, state: AgentState) -> AgentState:
         """Execute intent analysis step"""
@@ -2274,6 +2600,8 @@ class SimpleStateOrchestrator:
         state['answer'] = f"I apologize, but I encountered an error: {state['error']}"
         print(f"[State Orchestrator] Error handled: {state['error']}")
         return state
+
+
 
 @app.route("/api/query/stream", methods=["POST"])
 def query_ai_assistant_stream():
@@ -2380,34 +2708,20 @@ def query_ai_assistant_stream():
 orchestrator = SimpleStateOrchestrator()
 print("Integrated State Orchestrator initialized with Intent, Integrated Entity (Database), and Enhanced Answer agents")
 @time_function
-def process_samm_query(query: str, chat_history: List = None, documents_context: List = None, user_profile: Dict = None) -> Dict[str, Any]:
+def process_samm_query(query: str, chat_history: List = None, documents_context: List = None) -> Dict[str, Any]:
     """Process query through integrated state orchestrated 3-agent system with database connections"""
-    return orchestrator.process_query(query, chat_history, documents_context, user_profile)
+    return orchestrator.process_query(query, chat_history, documents_context)
 
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
 def get_mock_user():
-    """Return a mock user with appropriate clearance for demo purposes"""
+    """Return a mock user for demo purposes"""
     return {
         "sub": "mock-user-123",
         "name": "Demo User",
-        "email": "demo@example.com",
-        # Add authorization and clearance levels
-        "authorization_level": "secret",  # Options: "unclassified", "confidential", "secret", "top_secret"
-        "clearance": "secret",
-        "roles": ["fms_officer", "samm_user", "case_manager"],
-        # Add organizational context
-        "organization": "DSCA",
-        "department": "FMS Operations",
-        # Add access permissions
-        "permissions": [
-            "read_fms_cases",
-            "write_fms_cases", 
-            "access_itar_controlled",
-            "view_classified_content"
-        ]
+        "email": "demo@example.com"
     }
 
 def require_auth():
@@ -2418,17 +2732,7 @@ def require_auth():
     
     # For OAuth
     if "userinfo" in user_session_data and "sub" in user_session_data["userinfo"]:
-        user_info = user_session_data["userinfo"]
-        # Ensure clearance fields exist even for OAuth users
-        if "authorization_level" not in user_info:
-            user_info["authorization_level"] = "unclassified"
-        if "clearance" not in user_info:
-            user_info["clearance"] = "unclassified"
-        if "roles" not in user_info:
-            user_info["roles"] = ["samm_user"]
-        if "permissions" not in user_info:
-            user_info["permissions"] = ["read_fms_cases"]
-        return user_info
+        return user_session_data["userinfo"]
     
     # For mock user (when OAuth not configured)
     if not oauth:
@@ -2816,7 +3120,7 @@ def delete_chat_attachment():
 
 @app.route("/api/query", methods=["POST"])
 def query_ai_assistant():
-    """Main SAMM query endpoint with compliance integration"""
+    """Main SAMM query endpoint using Integrated state orchestrated 3-agent system with database connections"""
     user = require_auth()
     if not user:
         return jsonify({"error": "User not authenticated"}), 401
@@ -2829,48 +3133,49 @@ def query_ai_assistant():
     try:
         data = request.get_json()
         user_input = data.get("question", "").strip()
-        chat_history = data.get("chat_history", [])
-        staged_chat_documents_metadata = data.get("staged_chat_documents", [])
+        chat_history = data.get("chat_history", []) 
+        staged_chat_documents_metadata = data.get("staged_chat_documents", []) 
         
         if not user_input:
             return jsonify({"error": "Query cannot be empty"}), 400
 
-        # Build user profile for compliance checking
-        user_profile = {
-            "user_id": user_id,
-            "authorization_level": user.get("authorization_level", "unclassified"),
-            "clearance": user.get("clearance", "unclassified"),
-            "roles": user.get("roles", []),
-            "name": user.get("name", ""),
-            "email": user.get("email", "")
-        }
-
-        print(f"[Query] User: {user_id}, Auth: {user_profile['authorization_level']}, Query: '{user_input}'")
+        print(f"[Integrated SAMM Query] User: {user_id}, Processing: '{user_input}'")
+        print(f"[Integrated SAMM Query] Chat History items: {len(chat_history)}")
+        print(f"[Integrated SAMM Query] Staged Chat Documents: {len(staged_chat_documents_metadata)}")
         
-        # Process through integrated system with compliance
-        result = process_samm_query(
-            user_input, 
-            chat_history, 
-            staged_chat_documents_metadata,
-            user_profile=user_profile
-        )
+        # Process through Integrated state orchestrated 3-agent system with database connections
+        result = process_samm_query(user_input, chat_history, staged_chat_documents_metadata)
         
-        compliance_info = result.get('compliance_result', {})
-        print(f"[Query Result] Intent: {result['intent']}, "
-              f"Compliance: {compliance_info.get('compliance_status', 'not_checked')}, "
-              f"Authorized: {compliance_info.get('authorized', 'N/A')}")
+        print(f"[Integrated SAMM Result] Intent: {result['intent']}, Entities: {result['entities_found']}, Time: {result['execution_time']}s")
+        print(f"[Integrated SAMM Result] Workflow Steps: {len(result.get('execution_steps', []))}")
+        print(f"[Integrated SAMM Result] System Version: {result['metadata'].get('system_version', 'Unknown')}")
+        print(f"[Integrated SAMM Result] Database Results: {result['metadata'].get('total_database_results', 0)}")
         
+        # Return response in the same format as before for Vue.js UI compatibility
         response_data = {
             "response": {"answer": result["answer"]},
             "metadata": result["metadata"],
-            "compliance": compliance_info,
-            "uploadedChatDocuments": []
+            "uploadedChatDocuments": []  # For future AI-generated documents
         }
+        
+        # Add execution steps only in debug mode or if requested
+        if data.get("debug", False) or data.get("include_workflow", False):
+            response_data["execution_steps"] = result.get("execution_steps", [])
+            response_data["workflow_info"] = {
+                "orchestration": "integrated_database_state",
+                "steps_completed": len(result.get("execution_steps", [])),
+                "execution_time": result["execution_time"],
+                "entity_extraction_method": result["metadata"].get("entity_extraction_method", "unknown"),
+                "entity_confidence": result["metadata"].get("entity_confidence", 0),
+                "extraction_phases": result["metadata"].get("extraction_phases", 0),
+                "database_results": result["metadata"].get("total_database_results", 0),
+                "database_integration": result["metadata"].get("database_integration", {})
+            }
         
         return jsonify(response_data)
 
     except Exception as e:
-        print(f"[Query] Error: {str(e)}")
+        print(f"[Integrated SAMM Query] Error: {str(e)}")
         return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
 
 @app.route("/api/system/status", methods=["GET"])

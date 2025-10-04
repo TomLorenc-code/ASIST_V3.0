@@ -1,4 +1,8 @@
+
 # app.py - Complete Integrated SAMM ASIST System with Enhanced Agents
+# SHAZIA USER STORY 588
+# Tom USER STORY 582
+# Tom USER STORY 589
 import os
 import json
 import uuid 
@@ -179,7 +183,23 @@ def get_from_cache(query: str) -> Optional[Dict[str, Any]]:
     cache_stats['total_queries'] += 1
     print(f"[Cache MISS] Query: '{query[:50]}...'")
     return None
-
+def fetch_blob_content(blob_name: str, container_client) -> Optional[str]:
+    """Fetch text content from a blob for AI processing"""
+    if not container_client:
+        return None
+    
+    try:
+        blob_client = container_client.get_blob_client(blob_name)
+        download_stream = blob_client.download_blob()
+        content = download_stream.readall()
+        
+        try:
+            return content.decode('utf-8')
+        except UnicodeDecodeError:
+            return f"[Binary file: {blob_name}]"
+    except Exception as e:
+        print(f"[Blob Fetch] Error reading {blob_name}: {e}")
+        return None
 def save_to_cache(query: str, answer: str, metadata: Dict[str, Any]) -> bool:
     """
     Save query-answer pair to cache
@@ -1671,6 +1691,7 @@ Provide SAMM Chapter 1 context for this entity:"""
         print(f"[IntegratedEntityAgent Trigger] Total dynamic entities: {len(self.dynamic_knowledge['entities'])}")
         return True
 
+
 class EnhancedAnswerAgent:
     """
     Enhanced Answer Agent for SAMM Chapter 1 with sophisticated response generation
@@ -1790,7 +1811,7 @@ class EnhancedAnswerAgent:
     @time_function
     def generate_answer(self, query: str, intent_info: Dict, entity_info: Dict, 
                     chat_history: List = None, documents_context: List = None,
-                    user_profile: Dict = None) -> str:  # ← ADDED user_profile parameter
+                    user_profile: Dict = None) -> str:
         """
         Main method for enhanced answer generation with ITAR compliance filtering
         """
@@ -1800,7 +1821,7 @@ class EnhancedAnswerAgent:
         print(f"[Enhanced AnswerAgent] Generating answer for intent: {intent} (confidence: {confidence:.2f})")
 
         try:
-            # === ITAR COMPLIANCE CHECK (NEW SECTION) ===
+            # === ITAR COMPLIANCE CHECK ===
             compliance_result = check_compliance(query, intent_info, entity_info, user_profile)
             
             # Log compliance check
@@ -1832,8 +1853,6 @@ class EnhancedAnswerAgent:
             if compliance_result.get("check_performed"):
                 print(f"[Compliance] Query authorized - proceeding with answer generation")
             # === END ITAR COMPLIANCE CHECK ===
-            
-            # EXISTING CODE CONTINUES UNCHANGED FROM HERE
             
             # Step 1: Check for existing corrections first
             cached_answer = self._check_for_corrections(query, intent_info, entity_info)
@@ -1932,6 +1951,20 @@ class EnhancedAnswerAgent:
                 # Limit to most relevant relationships
                 context_parts.extend(entity_info["relationships"][:3])
             
+            # === NEW: Add uploaded document content ===
+            if documents_context:
+                context_parts.append("\n=== UPLOADED DOCUMENT CONTENT ===")
+                for doc in documents_context[:3]:  # Limit to 3 documents
+                    filename = doc.get('fileName', 'Unknown')
+                    content = doc.get('content', '')
+                    if content and not content.startswith("[Binary file:"):
+                        # Truncate long content
+                        truncated = content[:1500] + "..." if len(content) > 1500 else content
+                        context_parts.append(f"Document: {filename}\n{truncated}")
+                    else:
+                        context_parts.append(f"- {filename} (binary/unavailable)")
+            # === END NEW ===
+            
             # Add custom knowledge from HIL feedback and triggers
             if self.custom_knowledge:
                 context_parts.append("\n=== ADDITIONAL KNOWLEDGE ===")
@@ -1946,12 +1979,6 @@ class EnhancedAnswerAgent:
                     role = msg.get('role', 'unknown')
                     content = msg.get('content', '')[:200]  # Truncate long messages
                     context_parts.append(f"{role}: {content}")
-            
-            # Add document context if available
-            if documents_context:
-                context_parts.append("\n=== REFERENCED DOCUMENTS ===")
-                for doc in documents_context[:3]:  # Limit to 3 documents
-                    context_parts.append(f"- {doc.get('fileName', 'Unknown file')}")
             
             return "\n".join(context_parts)
             
@@ -3375,6 +3402,8 @@ def delete_chat_attachment():
         return jsonify({"error": "Failed to delete file from storage.", "details": str(e)}), 500
 
 
+
+
 @app.route("/api/query", methods=["POST"])
 def query_ai_assistant():
     """Main SAMM query endpoint using Integrated state orchestrated 3-agent system with caching and ITAR compliance"""
@@ -3396,7 +3425,7 @@ def query_ai_assistant():
         if not user_input:
             return jsonify({"error": "Query cannot be empty"}), 400
 
-        # === Extract user authorization profile (NEW) ===
+        # === Extract user authorization profile ===
         user_profile = {
             "user_id": user_id,
             "authorization_level": user.get("authorization_level", DEFAULT_DEV_AUTH_LEVEL),
@@ -3404,9 +3433,22 @@ def query_ai_assistant():
             "role": user.get("role", "developer")
         }
         print(f"[Integrated SAMM Query] User: {user_id}, Auth: {user_profile['authorization_level']}, Query: '{user_input[:50]}...'")
-        # === END ===
 
-        # STEP 1: Check cache first (EXISTING - UNCHANGED)
+        # === NEW: Load actual document content from blob storage ===
+        documents_with_content = []
+        for doc_meta in staged_chat_documents_metadata:
+            blob_name = doc_meta.get("blobName")
+            if blob_name and chat_docs_blob_container_client:
+                content = fetch_blob_content(blob_name, chat_docs_blob_container_client)
+                if content:
+                    documents_with_content.append({
+                        **doc_meta,
+                        "content": content[:5000]  # Limit to 5000 chars to avoid overload
+                    })
+                    print(f"[Query] Loaded content from {doc_meta.get('fileName')}: {len(content)} chars")
+        # === END NEW ===
+
+        # STEP 1: Check cache first
         cached_result = get_from_cache(user_input)
         
         if cached_result:
@@ -3423,23 +3465,22 @@ def query_ai_assistant():
             
             return jsonify(response_data)
         
-        # STEP 2: Cache miss - process query normally (EXISTING - UNCHANGED)
+        # STEP 2: Cache miss - process query normally
         print(f"[Integrated SAMM Query] Chat History items: {len(chat_history)}")
         print(f"[Integrated SAMM Query] Staged Chat Documents: {len(staged_chat_documents_metadata)}")
         
-        # Process through Integrated state orchestrated 3-agent system with database connections
-        # UPDATED: Now passes user_profile for ITAR compliance
-        result = process_samm_query(user_input, chat_history, staged_chat_documents_metadata, user_profile)
+        # MODIFIED: Pass documents_with_content instead of staged_chat_documents_metadata
+        result = process_samm_query(user_input, chat_history, documents_with_content, user_profile)
         
         print(f"[Integrated SAMM Result] Intent: {result['intent']}, Entities: {result['entities_found']}, Time: {result['execution_time']}s")
         print(f"[Integrated SAMM Result] Workflow Steps: {len(result.get('execution_steps', []))}")
         print(f"[Integrated SAMM Result] System Version: {result['metadata'].get('system_version', 'Unknown')}")
         print(f"[Integrated SAMM Result] Database Results: {result['metadata'].get('total_database_results', 0)}")
         
-        # STEP 3: Save to cache (EXISTING - UNCHANGED)
+        # STEP 3: Save to cache
         save_to_cache(user_input, result['answer'], result['metadata'])
         
-        # Return response in the same format as before for Vue.js UI compatibility (EXISTING - UNCHANGED)
+        # Return response in the same format as before for Vue.js UI compatibility
         response_data = {
             "response": {"answer": result["answer"]},
             "metadata": result["metadata"],
@@ -3447,7 +3488,7 @@ def query_ai_assistant():
             "cached": False  # Fresh answer
         }
         
-        # Add execution steps only in debug mode or if requested (EXISTING - UNCHANGED)
+        # Add execution steps only in debug mode or if requested
         if data.get("debug", False) or data.get("include_workflow", False):
             response_data["execution_steps"] = result.get("execution_steps", [])
             response_data["workflow_info"] = {
@@ -3466,7 +3507,8 @@ def query_ai_assistant():
     except Exception as e:
         print(f"[Integrated SAMM Query] Error: {str(e)}")
         return jsonify({"error": f"Internal Server Error: {str(e)}"}), 500
-    
+
+
 
 @app.route("/api/cache/stats", methods=["GET"])
 def get_cache_statistics():

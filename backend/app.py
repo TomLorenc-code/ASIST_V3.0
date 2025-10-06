@@ -1,8 +1,12 @@
 
+
+
 # app.py - Complete Integrated SAMM ASIST System with Enhanced Agents
 # SHAZIA USER STORY 588
 # Tom USER STORY 582
 # Tom USER STORY 589
+# SHAZIA USER STORY 571
+# SHAZIA USER STORY 563 & 568
 import os
 import json
 import uuid 
@@ -97,8 +101,8 @@ AZURE_CHAT_DOCS_CONTAINER_NAME = os.getenv("AZURE_CHAT_DOCS_CONTAINER_NAME")
 # Database Configuration for Enhanced Agents
 COSMOS_GREMLIN_CONFIG = {
     'endpoint': os.getenv("COSMOS_GREMLIN_ENDPOINT", "asist-graph-db.gremlin.cosmos.azure.com").replace('wss://', '').replace(':443/', ''),
-    'database': os.getenv("COSMOS_GREMLIN_DATABASE", "ASIST-Agent-1DB"),
-    'graph': os.getenv("COSMOS_GREMLIN_COLLECTION", "Agent1"),
+    'database': os.getenv("COSMOS_GREMLIN_DATABASE", "ASIST-Agent-1.1DB"),
+    'graph': os.getenv("COSMOS_GREMLIN_COLLECTION", "AGENT1.1"),
     'password': os.getenv("COSMOS_GREMLIN_KEY", "")
 }
 
@@ -1595,6 +1599,24 @@ Provide SAMM Chapter 1 context for this entity:"""
                 relationships.append(rel_text)
                 print(f"[IntegratedEntityAgent] Dynamic relationship: {rel_text}")
         
+
+
+        # Add relationships from Cosmos DB Gremlin results
+        cosmos_results = data_sources.get("cosmos_gremlin", {}).get("results", [])
+        for result in cosmos_results:
+            if result.get("type") == "edge":
+                edge_data = result.get("data", {})
+        # Extract relationship information from edge
+                if isinstance(edge_data, dict):
+                    label = edge_data.get("label", "relates_to")
+            # Try to get vertex names from edge properties
+                    from_name = edge_data.get("from_name", edge_data.get("outV", "unknown"))
+                    to_name = edge_data.get("to_name", edge_data.get("inV", "unknown"))
+            
+                    rel_text = f"{from_name} {label} {to_name}"
+                    relationships.append(rel_text)
+                    print(f"[IntegratedEntityAgent] Cosmos DB relationship: {rel_text}")
+        
         # Remove duplicates
         relationships = list(dict.fromkeys(relationships))
         
@@ -2148,6 +2170,7 @@ CRITICAL REQUIREMENTS:
             intent = intent_info.get("intent", "general")
             entities = entity_info.get("entities", [])
             confidence = intent_info.get("confidence", 0.5)
+            relationships = entity_info.get("relationships", [])  # NEW: Get relationships
             
             prompt_parts = []
             
@@ -2163,11 +2186,18 @@ CRITICAL REQUIREMENTS:
                 limited_entities = entities[:3]  # Limit to 3 entities
                 prompt_parts.append(f"Key entities mentioned: {', '.join(limited_entities)}")
             
+            # NEW: Add relationship data explicitly
+            if relationships:
+                prompt_parts.append("\nIMPORTANT - Use these specific relationships from the database:")
+                for rel in relationships[:5]:  # Limit to 5 relationships
+                    prompt_parts.append(f"- {rel}")
+                prompt_parts.append("\nBase your answer on these actual relationships, not generic knowledge.")
+            
             # Add specific instructions based on intent
             intent_instructions = {
                 "definition": "Provide a complete, authoritative definition with proper SAMM section reference.",
                 "distinction": "Explain the key differences clearly with specific examples and legal basis.",
-                "authority": "Explain who has authority, the scope of that authority, and the legal basis.",
+                "authority": "Explain who has authority, the scope of that authority, and the legal basis. USE THE RELATIONSHIPS PROVIDED ABOVE.",
                 "organization": "Describe the organization's full name, role, and specific responsibilities.",
                 "factual": "Provide the specific factual information with proper context and citation.",
                 "relationship": "Describe how the entities relate to each other and why this matters."

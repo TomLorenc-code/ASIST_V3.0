@@ -1,5 +1,6 @@
 
 
+
 # app.py - Complete Integrated SAMM ASIST System with Enhanced Agents
 # SHAZIA USER STORY 588
 # Tom USER STORY 582
@@ -2951,7 +2952,7 @@ def query_ai_assistant_stream():
             
             yield f"data: {json.dumps({'type': 'entities_complete', 'data': {'count': len(entity_info.get('entities', [])), 'entities': entity_info.get('entities', []), 'confidence': entity_info.get('overall_confidence', 0)}, 'time': entity_time})}\n\n"
             
-            # === STEP 3: ITAR COMPLIANCE CHECK (NEW) ===
+            # === STEP 3: ITAR COMPLIANCE CHECK ===
             yield f"data: {json.dumps({'type': 'progress', 'step': 'compliance_check', 'message': 'Checking ITAR compliance...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
             
             compliance_start = time.time()
@@ -2990,41 +2991,43 @@ def query_ai_assistant_stream():
             context = orchestrator.answer_agent._build_comprehensive_context(
                 user_input, intent_info, entity_info, chat_history, staged_chat_documents_metadata
             )
+            
             # AUTHORITY QUESTION FIX - Show database facts only
             if intent_info.get("intent") == "authority":
                 print(f"[Streaming] Authority question detected - showing database relationships")
-    
-                    relationships = entity_info.get('relationships', [])
-                    entities = entity_info.get('entities', [])
-    
-    # Build factual answer from database only
-                    authority_answer = f"**Query:** {user_input}\n\n"
-                    authority_answer += "**Database Relationships Found:**\n\n"
-    
-                    if relationships:
-                        for i, rel in enumerate(relationships[:8], 1):
-                            authority_answer += f"{i}. {rel}\n"
-                    else:
-                        authority_answer += "No direct relationships found in database.\n"
-    
-                    authority_answer += f"\n**Entities Identified:** {', '.join(entities)}\n\n"
-                    authority_answer += "**Note:** This response shows actual database relationships from the SAMM knowledge graph. "
-                    authority_answer += "No interpretations or external legal citations have been added."
-    
-    # Stream this answer
-                    yield {"type": "answer_start", "message": "Streaming database facts..."}
-    
-                    token_count = 0
-                    for token in authority_answer.split():
-                         token_count += 1
-                    yield {"type": "answer_token", "token": token + " ", "position": token_count}
-    
-                    answer_time = round(time.time() - answer_start, 2)
-                    total_time = round(time.time() - start_time, 2)
-    
-                    yield {"type": "complete", "data": {"intent": intent_info.get("intent"), "entities_found": len(entities), "answer_length": len(authority_answer), "timings": {"answer": answer_time, "total": total_time}}}
-                    return
-            # Stream the answer
+                
+                relationships = entity_info.get('relationships', [])
+                entities = entity_info.get('entities', [])
+                
+                # Build factual answer from database only
+                authority_answer = f"**Query:** {user_input}\n\n"
+                authority_answer += "**Database Relationships Found:**\n\n"
+                
+                if relationships:
+                    for i, rel in enumerate(relationships[:8], 1):
+                        authority_answer += f"{i}. {rel}\n"
+                else:
+                    authority_answer += "No direct relationships found in database.\n"
+                
+                authority_answer += f"\n**Entities Identified:** {', '.join(entities)}\n\n"
+                authority_answer += "**Note:** This response shows actual database relationships from the SAMM knowledge graph. "
+                authority_answer += "No interpretations or external legal citations have been added."
+                
+                # Stream this answer
+                yield f"data: {json.dumps({'type': 'answer_start', 'message': 'Streaming database facts...'})}\n\n"
+                
+                token_count = 0
+                for token in authority_answer.split():
+                    token_count += 1
+                    yield f"data: {json.dumps({'type': 'answer_token', 'token': token + ' ', 'position': token_count})}\n\n"
+                
+                answer_time = round(time.time() - answer_start, 2)
+                total_time = round(time.time() - start_time, 2)
+                
+                yield f"data: {json.dumps({'type': 'complete', 'data': {'intent': intent_info.get('intent'), 'entities_found': len(entities), 'answer_length': len(authority_answer), 'timings': {'answer': answer_time, 'total': total_time}}})}\n\n"
+                return
+            
+            # Stream the answer for non-authority questions
             if intent_info.get("intent") == "authority" and "navy" in user_input.lower() and "fms" in user_input.lower():
                 print("[Streaming] Navy FMS question detected - using verified answer")
                 navy_fms_answer = """**Authority Holder:** Defense Security Cooperation Agency (DSCA)
@@ -3040,7 +3043,7 @@ def query_ai_assistant_stream():
 
 **Summary:** DSCA is responsible for directing Navy FMS cases under Section 36 AECA."""
                 
-                # Stream the answer (CORRECTED: use intent_info.get("intent") instead of intent variable)
+                # Stream the answer
                 yield f"data: {json.dumps({'type': 'answer_start', 'message': 'Streaming answer...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
                 
                 full_answer = navy_fms_answer
@@ -3053,48 +3056,15 @@ def query_ai_assistant_stream():
                 answer_time = round(time.time() - answer_start, 2)
                 total_time = round(time.time() - start_time, 2)
                 
-                # FIXED: Use intent_info.get("intent") instead of undefined 'intent' variable
                 yield f"data: {json.dumps({'type': 'complete', 'data': {'compliance_approved': True, 'intent': intent_info.get('intent', 'authority'), 'entities_found': len(entity_info.get('entities', [])), 'answer_length': len(navy_fms_answer), 'token_count': token_count, 'timings': {'answer': answer_time, 'total': total_time}}})}\n\n"
                 return
-
+            
+            # Get intent for normal processing
             intent = intent_info.get("intent", "general")
             
-            # For authority questions, use strict database-only instructions
-            if intent_info.get("intent") == "authority":
-                system_msg = """You are a SAMM expert. Answer ONLY using the provided database relationships.
-
- CRITICAL RULES:
-- Use ONLY the relationships shown in the context
-- DO NOT make up legal citations (no "Section 102", "NDAA sections", etc.)
-- DO NOT invent authorities or laws
-- If a relationship exists in the database, state it clearly
-- If information is not in the relationships, say "not specified in available data"
-
-RESPONSE FORMAT:
-**Authority Holder:** [from relationships]
-**Scope:** [from relationships]  
-**Basis:** [only if explicitly in relationships, otherwise omit]
-
-Be direct and factual. Use only what the database provides."""
-            else:
-                # Get intent
-                intent = intent_info.get("intent", "general")
-            
-            # For authority questions, use ONLY database relationships - no AI interpretation
-            if intent == "authority":
-                # Get relationships
-                relationships = entity_info.get('relationships', [])
-                
-                # Build prompt that ONLY lists database facts
-                prompt = f"List these database relationships:\n\n"
-                for i, rel in enumerate(relationships[:8], 1):
-                    prompt += f"{i}. {rel}\n"
-                
-                system_msg = "You are showing database facts. List ONLY what is provided. Do not add interpretations, legal citations, or additional information."
-            else:
-                system_msg = orchestrator.answer_agent._create_optimized_system_message(intent, context)
-                prompt = orchestrator.answer_agent._create_enhanced_prompt(user_input, intent_info, entity_info)
-                
+            # Create system message and prompt
+            system_msg = orchestrator.answer_agent._create_optimized_system_message(intent, context)
+            prompt = orchestrator.answer_agent._create_enhanced_prompt(user_input, intent_info, entity_info)
             
             # Signal that streaming answer is about to start
             yield f"data: {json.dumps({'type': 'answer_start', 'message': 'Streaming answer...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
@@ -3139,7 +3109,6 @@ Be direct and factual. Use only what the database provides."""
             'Connection': 'keep-alive'
         }
     )
-
 
 # Initialize integrated orchestrator with all agents
 orchestrator = SimpleStateOrchestrator()

@@ -1304,7 +1304,23 @@ class IntegratedEntityAgent:
         NOW WITH FILE CONTENT EXTRACTION
         """
         print(f"[IntegratedEntityAgent] Processing query: '{query}' with intent: {intent_info.get('intent', 'unknown')}")
+
+
         
+        # ✅ CRITICAL: ALWAYS log file status at entry point
+        if documents_context:
+            print(f"[IntegratedEntityAgent] 📁 RECEIVED {len(documents_context)} FILES")
+            for idx, doc in enumerate(documents_context[:3], 1):
+                fname = doc.get('fileName', 'Unknown')
+                content_len = len(doc.get('content', ''))
+                has_content = len(doc.get('content', '')) > 50
+                print(f"[IntegratedEntityAgent]   File {idx}: {fname} ({content_len} chars) - {'✅ READY' if has_content else '⚠️ INSUFFICIENT'}")
+        else:
+            print(f"[IntegratedEntityAgent] ⚠️ WARNING: No files provided (documents_context is None/empty)")
+        
+
+
+
         try:
             # Phase 1: Enhanced entity extraction FROM QUERY
             entities = self._extract_entities_enhanced(query, intent_info)
@@ -2066,6 +2082,17 @@ class EnhancedAnswerAgent:
         """
         Main method for enhanced answer generation with ITAR compliance filtering
         """
+        # ✅ CRITICAL: ALWAYS log file status at entry point
+        if documents_context:
+            print(f"[AnswerAgent] 📁 RECEIVED {len(documents_context)} FILES for answer generation")
+            for idx, doc in enumerate(documents_context[:3], 1):
+                fname = doc.get('fileName', 'Unknown')
+                content_len = len(doc.get('content', ''))
+                has_content = len(doc.get('content', '')) > 50
+                print(f"[AnswerAgent]   File {idx}: {fname} ({content_len} chars) - {'✅ READY' if has_content else '⚠️ INSUFFICIENT'}")
+        else:
+            print(f"[AnswerAgent] ⚠️ WARNING: No files provided for answer generation")
+                
         intent = intent_info.get("intent", "general")
         confidence = intent_info.get("confidence", 0.5)
         
@@ -2917,6 +2944,11 @@ class SimpleStateOrchestrator:
             current_step=WorkflowStep.INIT.value,
             error=None
         )
+        # ✅ ADD THESE 3 LINES HERE:
+        print(f"[DEBUG PROCESS_QUERY] Received documents_context: {documents_context is not None}")
+        print(f"[DEBUG PROCESS_QUERY] documents_context type: {type(documents_context)}")
+        print(f"[DEBUG PROCESS_QUERY] documents_context length: {len(documents_context) if documents_context else 0}")
+    
         state['user_profile'] = user_profile or {"authorization_level": DEFAULT_DEV_AUTH_LEVEL}
         try:
             # Execute workflow
@@ -3140,9 +3172,17 @@ class SimpleStateOrchestrator:
             return {"intent": "general", "confidence": 0.5, "entities_mentioned": []}
 
     @time_function
+
     def _extract_entities_step(self, state: AgentState) -> AgentState:
         """Execute integrated entity extraction with database queries"""
-        # Skip entity extraction for special cases
+        # NEW DEBUG LINES - ADD THESE 3 LINES:
+        print(f"[DEBUG STATE] documents_context exists: {'documents_context' in state}")
+        print(f"[DEBUG STATE] documents_context value: {state.get('documents_context', 'NOT FOUND')}")
+        print(f"[DEBUG STATE] documents_context length: {len(state.get('documents_context', [])) if state.get('documents_context') else 0}")
+    
+
+        
+        # ✅ EXISTING: Skip entity extraction for special cases
         if state['intent_info'].get('special_case', False):
             print(f"[State Orchestrator] Skipping entity extraction for special case: {state['intent_info'].get('intent')}")
             state['entity_info'] = {
@@ -3153,18 +3193,70 @@ class SimpleStateOrchestrator:
             }
             state['execution_steps'].append("Entity extraction skipped (special case)")
             return state
+        
         try:
-            state['entity_info'] = self.entity_agent.extract_and_retrieve(state['query'], state['intent_info'])
+            # ✅ ADDED: Get documents from state (safe - defaults to None if not present)
+            documents_context = state.get('documents_context', None)
+            
+            # ✅ ADDED: Log file status for debugging
+            if documents_context:
+                print(f"[State Orchestrator] 📁 Passing {len(documents_context)} files to entity extraction")
+                for idx, doc in enumerate(documents_context[:3], 1):
+                    fname = doc.get('fileName', 'Unknown')
+                    content_len = len(doc.get('content', ''))
+                    print(f"[State Orchestrator]   File {idx}: {fname} ({content_len} chars)")
+            else:
+                print(f"[State Orchestrator] No files in state to pass to entity extraction")
+            
+            # ✅ FIXED: Now passes documents_context (was missing before)
+            state['entity_info'] = self.entity_agent.extract_and_retrieve(
+                state['query'], 
+                state['intent_info'],
+                documents_context  # ← ADDED THIS PARAMETER
+            )
+            
+            # ✅ EXISTING: Get entity extraction stats
             entities_count = len(state['entity_info'].get('entities', []))
             confidence = state['entity_info'].get('overall_confidence', 0)
             db_results = state['entity_info'].get('total_results', 0)
             phases = state['entity_info'].get('phase_count', 0)
-            state['execution_steps'].append(f"Integrated entity extraction: {entities_count} entities found (confidence: {confidence:.2f}, DB results: {db_results}, phases: {phases})")
-            print(f"[State Orchestrator] Integrated Entities: {entities_count} entities found through {phases} phases with {db_results} database results")
+            
+            # ✅ ADDED: Get file-related stats (safe - defaults to 0 if not present)
+            files_processed = state['entity_info'].get('files_processed', 0)
+            file_entities = state['entity_info'].get('file_entities_found', 0)
+            file_relationships = state['entity_info'].get('file_relationships_found', 0)
+            
+            # ✅ ENHANCED: Include file stats in execution step message
+            state['execution_steps'].append(
+                f"Integrated entity extraction: {entities_count} entities found "
+                f"(confidence: {confidence:.2f}, DB results: {db_results}, phases: {phases}, "
+                f"files: {files_processed}, file_entities: {file_entities}, file_rels: {file_relationships})"
+            )
+            
+            # ✅ ENHANCED: Include file stats in console log
+            print(f"[State Orchestrator] Integrated Entities: {entities_count} entities found "
+                f"through {phases} phases with {db_results} database results "
+                f"and {file_entities} entities from {files_processed} files")
+            
+            # ✅ ADDED: Log file-specific extraction details if files were processed
+            if files_processed > 0:
+                print(f"[State Orchestrator] 📊 File Extraction Results:")
+                print(f"[State Orchestrator]   • Files processed: {files_processed}")
+                print(f"[State Orchestrator]   • Entities from files: {file_entities}")
+                print(f"[State Orchestrator]   • Relationships from files: {file_relationships}")
+            
         except Exception as e:
+            # ✅ EXISTING: Error handling unchanged
             state['error'] = f"Integrated entity extraction failed: {str(e)}"
+            print(f"[State Orchestrator] ❌ Entity extraction error: {str(e)}")
+            
+            # ✅ ADDED: Add traceback for debugging
+            import traceback
+            print(f"[State Orchestrator] Error traceback:\n{traceback.format_exc()}")
+        
         return state
-    
+
+ 
     @time_function
     def _generate_answer_step(self, state: AgentState) -> AgentState:
         """Execute enhanced answer generation step"""
@@ -3212,7 +3304,6 @@ class SimpleStateOrchestrator:
         return state
 
 
-
 @app.route("/api/query/stream", methods=["POST"])
 def query_ai_assistant_stream():
     """Streaming SAMM query endpoint with ITAR compliance and real-time updates"""
@@ -3240,13 +3331,60 @@ def query_ai_assistant_stream():
         "role": user.get("role", "developer")
     }
     # === END ===
+    
+    # ✅ CRITICAL FIX: Load file content from blob storage BEFORE streaming starts
+    # Now with CORRECT container selection (case vs chat)
+    documents_with_content = []
+    if staged_chat_documents_metadata:
+        print(f"[Streaming] 📁 Loading content from {len(staged_chat_documents_metadata)} staged files...")
+        for idx, doc_meta in enumerate(staged_chat_documents_metadata, 1):
+            blob_name = doc_meta.get("blobName")
+            blob_container = doc_meta.get("blobContainer")  # ✅ ADDED: Get container type
+            file_name = doc_meta.get("fileName", "Unknown")
+            
+            if not blob_name:
+                print(f"[Streaming]   ⚠️ Missing blobName for {file_name}")
+                continue
+            
+            # ✅ CRITICAL FIX: Select correct container client based on metadata
+            container_client = None
+            if blob_container == AZURE_CASE_DOCS_CONTAINER_NAME:
+                container_client = case_docs_blob_container_client
+                print(f"[Streaming]   File {idx}: {file_name} (CASE container)")
+            elif blob_container == AZURE_CHAT_DOCS_CONTAINER_NAME:
+                container_client = chat_docs_blob_container_client
+                print(f"[Streaming]   File {idx}: {file_name} (CHAT container)")
+            else:
+                print(f"[Streaming]   ⚠️ Unknown container '{blob_container}' for {file_name}")
+            
+            if not container_client:
+                print(f"[Streaming]   ⚠️ Container client not available for {file_name}")
+                continue
+            
+            # Fetch content using the CORRECT container client
+            print(f"[Streaming]   Fetching file {idx}: {file_name} from {blob_container}")
+            content = fetch_blob_content(blob_name, container_client)
+            
+            if content:
+                documents_with_content.append({
+                    **doc_meta,
+                    "content": content[:5000]  # Limit to 5000 chars
+                })
+                print(f"[Streaming]   ✅ Loaded {len(content)} chars from {file_name}")
+            else:
+                print(f"[Streaming]   ⚠️ No content retrieved from {file_name}")
+        
+        print(f"[Streaming] 📊 Result: {len(documents_with_content)}/{len(staged_chat_documents_metadata)} files loaded successfully")
+    else:
+        print(f"[Streaming] No staged documents in request")
+    # ✅ END FILE LOADING
 
     def generate():
         try:
             start_time = time.time()
             
-            # START - Send immediately
-            yield f"data: {json.dumps({'type': 'start', 'query': user_input, 'timestamp': time.time()})}\n\n"
+            # START - Send immediately with file count
+            yield f"data: {json.dumps({'type': 'start', 'query': user_input, 'timestamp': time.time(), 'files_loaded': len(documents_with_content)})}\n\n"
             
             # STEP 1: Intent Analysis
             yield f"data: {json.dumps({'type': 'progress', 'step': 'intent_analysis', 'message': 'Analyzing query intent...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
@@ -3296,22 +3434,28 @@ Can I help you with any SAMM Chapter 1 topics instead?"""
             # === END SPECIAL CASE CHECK ===
             
             # STEP 2: Entity Extraction (only if NOT special case)
-            yield f"data: {json.dumps({'type': 'progress', 'step': 'entity_extraction', 'message': 'Extracting entities and querying databases...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
-            
-            intent_time = round(time.time() - intent_start, 2)
-            
-            yield f"data: {json.dumps({'type': 'intent_complete', 'data': intent_info, 'time': intent_time})}\n\n"
-            
-            # STEP 2: Entity Extraction
-            yield f"data: {json.dumps({'type': 'progress', 'step': 'entity_extraction', 'message': 'Extracting entities and querying databases...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+            # ✅ ENHANCED: Include file count in progress message
+            file_msg = f" and {len(documents_with_content)} files" if documents_with_content else ""
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'entity_extraction', 'message': f'Extracting entities from query{file_msg}...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
             
             entity_start = time.time()
-            entity_info = orchestrator.entity_agent.extract_and_retrieve(user_input, intent_info)
+            # ✅ CRITICAL FIX: Pass documents_with_content (with actual content from CORRECT container)
+            entity_info = orchestrator.entity_agent.extract_and_retrieve(
+                user_input, 
+                intent_info,
+                documents_with_content  # ← FIXED: Now passes files with content from correct container
+            )
             entity_time = round(time.time() - entity_start, 2)
             
-            yield f"data: {json.dumps({'type': 'entities_complete', 'data': {'count': len(entity_info.get('entities', [])), 'entities': entity_info.get('entities', []), 'confidence': entity_info.get('overall_confidence', 0)}, 'time': entity_time})}\n\n"
+            # ✅ ADDED: Extract file stats
+            files_processed = entity_info.get('files_processed', 0)
+            file_entities = entity_info.get('file_entities_found', 0)
+            file_relationships = entity_info.get('file_relationships_found', 0)
             
-            # === STEP 3: ITAR COMPLIANCE CHECK (NEW) ===
+            # ✅ ENHANCED: Include file stats in entity completion message
+            yield f"data: {json.dumps({'type': 'entities_complete', 'data': {'count': len(entity_info.get('entities', [])), 'entities': entity_info.get('entities', []), 'confidence': entity_info.get('overall_confidence', 0), 'files_processed': files_processed, 'file_entities': file_entities, 'file_relationships': file_relationships}, 'time': entity_time})}\n\n"
+            
+            # === STEP 3: ITAR COMPLIANCE CHECK ===
             yield f"data: {json.dumps({'type': 'progress', 'step': 'compliance_check', 'message': 'Checking ITAR compliance...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
             
             compliance_start = time.time()
@@ -3342,48 +3486,17 @@ Can I help you with any SAMM Chapter 1 topics instead?"""
             # === END COMPLIANCE CHECK ===
             
             # STEP 4: Answer Generation (only if authorized)
-            yield f"data: {json.dumps({'type': 'progress', 'step': 'answer_generation', 'message': 'Generating answer...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+            # ✅ ENHANCED: Include file context in progress message
+            file_context_msg = f" with {len(documents_with_content)} file(s)" if documents_with_content else ""
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'answer_generation', 'message': f'Generating answer{file_context_msg}...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
             
             answer_start = time.time()
             
-            # Build context
+            # Build context - ✅ CRITICAL FIX: Pass documents_with_content
             context = orchestrator.answer_agent._build_comprehensive_context(
-                user_input, intent_info, entity_info, chat_history, staged_chat_documents_metadata
+                user_input, intent_info, entity_info, chat_history, documents_with_content  # ← FIXED
             )
-            # Stream the answer
-            # Stream the answer
-            if intent_info.get("intent") == "authority" and "navy" in query.lower() and "fms" in query.lower():
-                print("[Streaming] Navy FMS question detected - using verified answer")
-                navy_fms_answer = """**Authority Holder:** Defense Security Cooperation Agency (DSCA)
-**Scope of Authority:** DSCA directs, administers, and provides guidance to DoD Components for the execution of Navy Foreign Military Sales (FMS) programs.
-
-**Legal Basis:** Section 36 of the Arms Export Control Act (AECA), as referenced in SAMM C1.3.2.2.
-
-**Delegation Chain:**
-1. Secretary of State - Title 22 supervision
-2. Secretary of Defense - Title 10 implementation  
-3. DSCA - directs SC programs including Navy FMS
-4. NIPO (Navy International Programs Office) - executes Navy FMS cases
-
-**Summary:** DSCA is responsible for directing Navy FMS cases under Section 36 AECA."""
-                
-                # Stream the answer (CORRECTED: use intent_info.get("intent") instead of intent variable)
-                yield f"data: {json.dumps({'type': 'answer_start', 'message': 'Streaming answer...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
-                
-                full_answer = navy_fms_answer
-                token_count = 0
-                
-                for token in navy_fms_answer.split():
-                    token_count += 1
-                    yield f"data: {json.dumps({'type': 'answer_token', 'token': token + ' ', 'position': token_count})}\n\n"
-                
-                answer_time = round(time.time() - answer_start, 2)
-                total_time = round(time.time() - start_time, 2)
-                
-                # FIXED: Use intent_info.get("intent") instead of undefined 'intent' variable
-                yield f"data: {json.dumps({'type': 'complete', 'data': {'compliance_approved': True, 'intent': intent_info.get('intent', 'authority'), 'entities_found': len(entity_info.get('entities', [])), 'answer_length': len(navy_fms_answer), 'token_count': token_count, 'timings': {'answer': answer_time, 'total': total_time}}})}\n\n"
-                return
-
+            
             intent = intent_info.get("intent", "general")
             system_msg = orchestrator.answer_agent._create_optimized_system_message(intent, context)
             prompt = orchestrator.answer_agent._create_enhanced_prompt(user_input, intent_info, entity_info)
@@ -3413,8 +3526,8 @@ Can I help you with any SAMM Chapter 1 topics instead?"""
             if enhanced_answer != full_answer:
                 yield f"data: {json.dumps({'type': 'answer_enhanced', 'enhanced_answer': enhanced_answer})}\n\n"
             
-            # Send completion with all metadata
-            yield f"data: {json.dumps({'type': 'complete', 'data': {'compliance_approved': True, 'intent': intent, 'entities_found': len(entity_info.get('entities', [])), 'answer_length': len(enhanced_answer), 'token_count': token_count, 'timings': {'intent': intent_time, 'entity': entity_time, 'compliance': compliance_time, 'answer': answer_time, 'total': total_time}}})}\n\n"
+            # ✅ ENHANCED: Send completion with file stats included
+            yield f"data: {json.dumps({'type': 'complete', 'data': {'compliance_approved': True, 'intent': intent, 'entities_found': len(entity_info.get('entities', [])), 'files_processed': files_processed, 'file_entities': file_entities, 'file_relationships': file_relationships, 'answer_length': len(enhanced_answer), 'token_count': token_count, 'timings': {'intent': intent_time, 'entity': entity_time, 'compliance': compliance_time, 'answer': answer_time, 'total': total_time}}})}\n\n"
             
         except Exception as e:
             import traceback

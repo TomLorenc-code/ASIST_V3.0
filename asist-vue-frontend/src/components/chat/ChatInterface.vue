@@ -70,7 +70,6 @@
               </li>
             </ul>
           </div>
-          <!-- HIL Feedback Button for AI Messages -->
           <div v-if="message.sender === 'ai' && !message.streaming" class="message-actions">
             <button 
               class="hil-feedback-btn" 
@@ -92,7 +91,6 @@
       </div>
     </div>
     
-    <!-- Streaming Status Indicator -->
     <div v-if="streamingStatusMessage" class="streaming-status">
       <div class="status-icon">
         <i class="fas fa-circle-notch fa-spin"></i>
@@ -120,7 +118,6 @@
         </button>
       </div>
       
-      <!-- Human-in-the-Loop Feedback Section -->
       <div v-if="showHilFeedback" class="hil-feedback-section">
         <div class="hil-header">
           <h4><i class="fas fa-user-edit"></i> Human-in-the-Loop Feedback</h4>
@@ -159,7 +156,6 @@
             </button>
           </div>
           
-          <!-- Intent Correction Tab -->
           <div v-if="activeHilTab === 'intent'" class="feedback-tab-content">
             <div class="form-group">
               <label>Original Intent:</label>
@@ -184,7 +180,6 @@
             </div>
           </div>
           
-          <!-- Entity Correction Tab -->
           <div v-if="activeHilTab === 'entities'" class="feedback-tab-content">
             <div class="form-group">
               <label>Original Entities (comma-separated):</label>
@@ -204,7 +199,6 @@
             </div>
           </div>
           
-          <!-- Answer Correction Tab -->
           <div v-if="activeHilTab === 'answer'" class="feedback-tab-content">
             <div class="form-group">
               <label>Corrected Answer:</label>
@@ -250,8 +244,8 @@
 <script setup>
 import { ref, onMounted, watch, nextTick } from 'vue';
 import { useChatStore } from '@/stores/chatStore'; 
+import { useCaseStore } from '@/stores/caseStore';
 import { marked } from 'marked'; 
-// UPDATED: Removed sendMessageStreaming import - no longer needed
 
 const props = defineProps({
   activeCaseId: {
@@ -261,15 +255,14 @@ const props = defineProps({
 });
 
 const chatStore = useChatStore();
+const caseStore = useCaseStore();
 
 const userInput = ref('');
 const chatMessagesContainerRef = ref(null);
 
-// Streaming state
 const isStreamingActive = ref(false);
 const streamingStatusMessage = ref('');
 
-// HIL Feedback State
 const showHilFeedback = ref(false);
 const activeHilTab = ref('intent');
 const selectedMessage = ref(null);
@@ -342,7 +335,6 @@ const scrollToBottom = () => {
   });
 };
 
-// UPDATED: Complete rewrite of submitMessage for native streaming
 const submitMessage = async () => {
   const textToSend = userInput.value.trim();
   
@@ -361,22 +353,52 @@ const submitMessage = async () => {
   
   console.log('[ChatInterface] Submitting message with streaming. Text:', textToSend);
   
-  // Add user message immediately
+  const allDocuments = [
+    ...chatStore.currentSessionContextDocuments.map(doc => ({
+      documentId: doc.documentId,
+      fileName: doc.fileName,
+      blobName: doc.blobName,
+      blobContainer: doc.blobContainer,
+      url: doc.url,
+      fileType: doc.fileType,
+      sizeBytes: doc.sizeBytes
+    })),
+    ...(caseStore.activeCaseDetails?.caseDocuments || []).map(doc => ({
+      documentId: doc.documentId,
+      fileName: doc.fileName,
+      blobName: doc.blobName,
+      blobContainer: doc.blobContainer || 'case-docs',
+      url: doc.url,
+      fileType: doc.fileType,
+      sizeBytes: doc.sizeBytes
+    }))
+  ];
+  
+  console.log('[ChatInterface] Total documents to send:', allDocuments.length);
+  console.log('[ChatInterface] - Chat attachments:', chatStore.currentSessionContextDocuments.length);
+  console.log('[ChatInterface] - Case documents:', caseStore.activeCaseDetails?.caseDocuments?.length || 0);
+  
+  allDocuments.forEach((doc, idx) => {
+    console.log(`[ChatInterface] Document ${idx + 1}:`, {
+      fileName: doc.fileName,
+      blobContainer: doc.blobContainer,
+      hasBlobName: !!doc.blobName
+    });
+  });
+  
   const userMessage = {
     sender: 'user',
     text: textToSend,
     timestamp: new Date().toISOString(),
-    sentContextDocuments: [...chatStore.currentSessionContextDocuments]
+    sentContextDocuments: allDocuments
   };
   
   chatStore.currentSessionMessages.push(userMessage);
   userInput.value = '';
   
-  // UPDATED: Set up streaming state
   isStreamingActive.value = true;
   streamingStatusMessage.value = 'Processing...';
   
-  // UPDATED: Create placeholder AI message
   const aiMessageIndex = chatStore.currentSessionMessages.length;
   chatStore.currentSessionMessages.push({
     sender: 'ai',
@@ -389,7 +411,6 @@ const submitMessage = async () => {
   scrollToBottom();
   
   try {
-    // UPDATED: Prepare chat history (exclude the placeholder message)
     const chatHistory = chatStore.currentSessionMessages
       .slice(0, -1)
       .map(msg => ({
@@ -397,7 +418,6 @@ const submitMessage = async () => {
         content: msg.text
       }));
     
-    // UPDATED: Call the streaming API with native fetch
     const response = await fetch('/api/query/stream', {
       method: 'POST',
       headers: {
@@ -406,20 +426,17 @@ const submitMessage = async () => {
       body: JSON.stringify({
         question: textToSend,
         chat_history: chatHistory,
-        staged_chat_documents: chatStore.currentSessionContextDocuments
+        staged_chat_documents: allDocuments
       })
     });
 
-    // UPDATED: Check response status
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
-    // UPDATED: Set up stream reading
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
 
-    // UPDATED: Read stream chunk by chunk
     while (true) {
       const { done, value } = await reader.read();
       
@@ -428,21 +445,21 @@ const submitMessage = async () => {
         break;
       }
 
-      // UPDATED: Decode the chunk
       const chunk = decoder.decode(value, { stream: true });
       const lines = chunk.split('\n');
 
-      // UPDATED: Process each line of the Server-Sent Events format
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           try {
             const jsonData = JSON.parse(line.slice(6));
             
-            // UPDATED: Handle different event types
             switch(jsonData.type) {
               case 'start':
                 console.log('[Streaming] Started processing query');
                 streamingStatusMessage.value = 'Starting...';
+                if (jsonData.files_loaded !== undefined) {
+                  console.log(`[Streaming] Backend loaded ${jsonData.files_loaded} files`);
+                }
                 break;
                 
               case 'progress':
@@ -461,6 +478,15 @@ const submitMessage = async () => {
                 chatStore.currentSessionMessages[aiMessageIndex].metadata.entities = jsonData.data.entities;
                 chatStore.currentSessionMessages[aiMessageIndex].metadata.entities_found = jsonData.data.count;
                 chatStore.currentSessionMessages[aiMessageIndex].metadata.entity_confidence = jsonData.data.confidence;
+                if (jsonData.data.files_processed) {
+                  console.log(`[Streaming] Files processed: ${jsonData.data.files_processed}`);
+                  console.log(`[Streaming] File entities found: ${jsonData.data.file_entities}`);
+                  console.log(`[Streaming] File relationships found: ${jsonData.data.file_relationships}`);
+                }
+                break;
+                
+              case 'compliance_complete':
+                console.log('[Streaming] Compliance check complete:', jsonData.data);
                 break;
                 
               case 'answer_start':
@@ -469,13 +495,11 @@ const submitMessage = async () => {
                 break;
                 
               case 'answer_token':
-                // UPDATED: Append each token to the message in real-time
                 chatStore.currentSessionMessages[aiMessageIndex].text += jsonData.token;
                 scrollToBottom();
                 break;
                 
               case 'answer_enhanced':
-                // UPDATED: Replace with enhanced version if provided
                 chatStore.currentSessionMessages[aiMessageIndex].text = jsonData.enhanced_answer;
                 scrollToBottom();
                 break;
@@ -484,7 +508,6 @@ const submitMessage = async () => {
                 console.log('[Streaming] Complete:', jsonData.data);
                 chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
                 
-                // UPDATED: Add final metadata
                 if (jsonData.data) {
                   Object.assign(chatStore.currentSessionMessages[aiMessageIndex].metadata, jsonData.data);
                 }
@@ -492,7 +515,6 @@ const submitMessage = async () => {
                 streamingStatusMessage.value = '';
                 isStreamingActive.value = false;
                 
-                // UPDATED: Save session
                 chatStore.saveChatSessionsToLS();
                 break;
                 
@@ -512,7 +534,6 @@ const submitMessage = async () => {
     }
     
   } catch (error) {
-    // UPDATED: Enhanced error handling
     console.error('[ChatInterface] Streaming error:', error);
     chatStore.currentSessionMessages[aiMessageIndex].text = `Error: ${error.message}`;
     chatStore.currentSessionMessages[aiMessageIndex].streaming = false;
@@ -521,7 +542,6 @@ const submitMessage = async () => {
   }
 };
 
-// HIL Feedback Functions
 const openHilFeedback = (message, index) => {
   selectedMessage.value = message;
   selectedMessageIndex.value = index;
@@ -677,7 +697,6 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
 </script>
 
 <style scoped>
-/* All CSS remains exactly the same - no changes needed */
 .chat-interface-panel {
   flex: 1; 
   background-color: white;
@@ -782,7 +801,6 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
     border: 1px solid var(--danger);
 }
 
-/* Streaming cursor animation */
 .message.ai-message[data-streaming="true"] .message-content::after {
   content: '▋';
   display: inline-block;
@@ -796,7 +814,6 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
   50%, 100% { opacity: 0; }
 }
 
-/* Streaming status indicator */
 .streaming-status {
   display: flex;
   align-items: center;
@@ -820,7 +837,6 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
   color: #1976d2;
 }
 
-/* Message Actions for HIL Feedback */
 .message-actions {
   margin-top: var(--space-xs);
   padding-top: var(--space-xs);
@@ -850,7 +866,6 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
   font-size: 0.7rem;
 }
 
-/* Styles for displaying attachments within a message bubble */
 .message-attachments {
   margin-top: var(--space-xs);
   font-size: 0.8rem;
@@ -973,7 +988,6 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
     cursor: not-allowed;
 }
 
-/* HIL Feedback Section Styles */
 .hil-feedback-section {
   margin-top: var(--space-sm);
   border: 2px solid #3498db;
@@ -1179,7 +1193,6 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
   transform: translateY(-1px);
 }
 
-/* Error and Success Messages */
 .upload-error-display,
 .hil-error-display {
   font-size: 0.8rem;
@@ -1197,7 +1210,6 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
   padding-left: var(--space-sm);
 }
 
-/* Responsive adjustments */
 @media (max-width: 768px) {
   .feedback-tabs {
     flex-direction: column;

@@ -1,5 +1,6 @@
 
 
+
 # app.py - Complete Integrated SAMM ASIST System with Enhanced Agents
 # SHAZIA USER STORY 588
 # Tom USER STORY 582
@@ -84,7 +85,7 @@ APP_SECRET_KEY = os.getenv("APP_SECRET_KEY", "DFd55vvJIcV79cGuEETrGc9HWiNDqducM7
 
 # Ollama Configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
 # Azure Storage Configuration
 COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")
@@ -101,14 +102,14 @@ AZURE_CHAT_DOCS_CONTAINER_NAME = os.getenv("AZURE_CHAT_DOCS_CONTAINER_NAME")
 COSMOS_GREMLIN_CONFIG = {
     'endpoint': os.getenv("COSMOS_GREMLIN_ENDPOINT", "asist-graph-db.gremlin.cosmos.azure.com").replace('wss://', '').replace(':443/', ''),
     'database': os.getenv("COSMOS_GREMLIN_DATABASE", "ASIST-Agent-1.1DB"),
-    'graph': os.getenv("COSMOS_GREMLIN_COLLECTION", "AGENT1.1"),
+    'graph': os.getenv("COSMOS_GREMLIN_COLLECTION", "AGENT1.2"),
     'password': os.getenv("COSMOS_GREMLIN_KEY", "")
 }
 
 # Vector Database Configuration
-VECTOR_DB_PATH = "./vector_db"
-VECTOR_DB_TTL_PATH = "./vector_db_ttl"
+VECTOR_DB_PATH = "C:\\Users\\TomLorenc\\Downloads\\ASIST_DEV\\ASIST_DEV\\backend\\veck"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+VECTOR_DB_COLLECTION = "samm_all"
 
 # =============================================================================
 # CACHE CONFIGURATION
@@ -349,7 +350,7 @@ def call_ollama_streaming(prompt: str, system_message: str = "", temperature: fl
                 "top_k": 40,
                 "repeat_penalty": 1.1,
                 "num_ctx": 2048,
-                "num_predict": 512
+                "num_predict": 800
             }
         }
         
@@ -438,7 +439,7 @@ def call_ollama_enhanced(prompt: str, system_message: str = "", temperature: flo
                 "top_k": 40,
                 "repeat_penalty": 1.1,
                 "num_ctx": 2048,  # Optimized context window for Llama 3.2
-                "num_predict": 512  # Maximum tokens to generate
+                "num_predict": 800  # Maximum tokens to generate
             }
         }
         
@@ -660,7 +661,6 @@ class DatabaseManager:
     def __init__(self):
         self.cosmos_gremlin_client = None
         self.vector_db_client = None
-        self.vector_db_ttl_client = None
         self.embedding_model = None
         self.initialize_connections()
     
@@ -713,23 +713,17 @@ class DatabaseManager:
                 self.vector_db_client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
                 collections = self.vector_db_client.list_collections()
                 print(f"[DatabaseManager] Vector DB connected - {len(collections)} collections available")
+            if collections:
+                for col in collections:
+                    print(f"\n[DEBUG] Collection: {col.name}")
+                    print(f"[DEBUG] Metadata: {col.metadata}")
+                    print(f"[DEBUG] Count: {col.count()}")
             else:
                 print(f"[DatabaseManager] Vector DB path not found: {VECTOR_DB_PATH}")
         except Exception as e:
             print(f"[DatabaseManager] Vector DB connection failed: {e}")
             self.vector_db_client = None
         
-        # Initialize ChromaDB vector_db_ttl (TTL files)
-        try:
-            if Path(VECTOR_DB_TTL_PATH).exists():
-                self.vector_db_ttl_client = chromadb.PersistentClient(path=VECTOR_DB_TTL_PATH)
-                collections = self.vector_db_ttl_client.list_collections()
-                print(f"[DatabaseManager] Vector DB TTL connected - {len(collections)} collections available")
-            else:
-                print(f"[DatabaseManager] Vector DB TTL path not found: {VECTOR_DB_TTL_PATH}")
-        except Exception as e:
-            print(f"[DatabaseManager] Vector DB TTL connection failed: {e}")
-            self.vector_db_ttl_client = None
     
     def _init_embedding_model(self):
         """Initialize embedding model"""
@@ -808,9 +802,12 @@ class DatabaseManager:
             print(f"[DatabaseManager] Cosmos Gremlin query error: {e}")
         
         return results
+
     
-    def query_vector_db(self, query_text: str, collection_name: str = None, n_results: int = 3) -> List[Dict]:
+    def query_vector_db(self, query_text: str, collection_name: str = None, n_results: int = 10) -> List[Dict]:
         """Query ChromaDB vector_db with reduced results"""
+        print(f"[DEBUG] query_vector_db called with query: '{query_text}'")
+        print(f"[DEBUG] collection_name: {collection_name}, n_results: {n_results}")
         if not self.vector_db_client or not self.embedding_model:
             return []
         
@@ -822,6 +819,7 @@ class DatabaseManager:
                 return []
             
             collection = collections[0] if not collection_name else self.vector_db_client.get_collection(collection_name)
+            print(f"[DEBUG] Using collection: {collection.name}")
             
             query_embedding = self.embedding_model.encode([query_text]).tolist()[0]
             
@@ -830,6 +828,7 @@ class DatabaseManager:
                 n_results=n_results,
                 include=['documents', 'metadatas', 'distances']
             )
+            print(f"[DEBUG] Query returned {len(query_results['ids'][0])} results")
             
             for i, (doc, metadata, distance) in enumerate(zip(
                 query_results['documents'][0],
@@ -838,9 +837,9 @@ class DatabaseManager:
             )):
                 results.append({
                     "type": "document_chunk",
-                    "content": doc[:500] + "..." if len(doc) > 500 else doc,  # Truncate long content
+                    "content": doc, 
                     "metadata": metadata,
-                    "similarity_score": round(1 - distance, 3),
+                    "similarity_score": round(float(distance), 3),  # Use raw distance/similarity
                     "source": "vector_db",
                     "collection": collection.name
                 })
@@ -849,49 +848,6 @@ class DatabaseManager:
             
         except Exception as e:
             print(f"[DatabaseManager] Vector DB query error: {e}")
-        
-        return results
-    
-    def query_vector_db_ttl(self, query_text: str, collection_name: str = None, n_results: int = 2) -> List[Dict]:
-        """Query ChromaDB vector_db_ttl with reduced results"""
-        if not self.vector_db_ttl_client or not self.embedding_model:
-            return []
-        
-        results = []
-        
-        try:
-            collections = self.vector_db_ttl_client.list_collections()
-            if not collections:
-                return []
-            
-            collection = collections[0] if not collection_name else self.vector_db_ttl_client.get_collection(collection_name)
-            
-            query_embedding = self.embedding_model.encode([query_text]).tolist()[0]
-            
-            query_results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results,
-                include=['documents', 'metadatas', 'distances']
-            )
-            
-            for i, (doc, metadata, distance) in enumerate(zip(
-                query_results['documents'][0],
-                query_results['metadatas'][0],
-                query_results['distances'][0]
-            )):
-                results.append({
-                    "type": "ttl_chunk",
-                    "content": doc[:300] + "..." if len(doc) > 300 else doc,  # Truncate long content
-                    "metadata": metadata,
-                    "similarity_score": round(1 - distance, 3),
-                    "source": "vector_db_ttl", 
-                    "collection": collection.name
-                })
-            
-            print(f"[DatabaseManager] Vector DB TTL query returned {len(results)} results")
-            
-        except Exception as e:
-            print(f"[DatabaseManager] Vector DB TTL query error: {e}")
         
         return results
     
@@ -918,11 +874,7 @@ class DatabaseManager:
                 "path": VECTOR_DB_PATH,
                 "collections": []
             },
-            "vector_db_ttl": {
-                "connected": self.vector_db_ttl_client is not None,
-                "path": VECTOR_DB_TTL_PATH,
-                "collections": []
-            },
+            
             "embedding_model": {
                 "loaded": self.embedding_model is not None,
                 "model_name": EMBEDDING_MODEL
@@ -934,13 +886,6 @@ class DatabaseManager:
             if self.vector_db_client:
                 collections = self.vector_db_client.list_collections()
                 status["vector_db"]["collections"] = [c.name for c in collections]
-        except:
-            pass
-        
-        try:
-            if self.vector_db_ttl_client:
-                collections = self.vector_db_ttl_client.list_collections()
-                status["vector_db_ttl"]["collections"] = [c.name for c in collections]
         except:
             pass
         
@@ -986,21 +931,136 @@ class IntentAgent:
         self.hil_feedback_data = []  # Store human feedback for intent corrections
         self.intent_patterns = {}    # Store learned patterns from feedback
         self.trigger_updates = []    # Store updates from new entity/relationship data
+        
+        # Special case patterns for non-SAMM, nonsense, and incomplete queries
+        self.special_case_patterns = {
+            "nonsense_keywords": [
+                "asdfghjkl", "qwerty", "xyzpdq", "flurble", "lorem ipsum",
+                "banana helicopter", "purple dreams", "sparkle fountain",
+                "waxing moon potato", "rainbow process asteroid"
+            ],
+            "incomplete_phrases": [
+                "what about it", "tell me about that", "explain that",
+                "the thing", "tell me about the thing", "can you explain that",
+                "what about", "who handles", "the process for", "explain how"
+            ],
+            "non_samm_topics": [
+                "nato", "article 5", "ndaa process", "title 50", "joint chiefs",
+                "intelligence community", "five eyes", "un security council",
+                "federal acquisition regulation", "far", "unified command plan",
+                "third offset", "national security strategy", "humanitarian assistance",
+                "bilateral agreement", "multilateral", "defense officer personnel"
+            ]
+        }
+
+    def _check_special_cases(self, query: str) -> Optional[Dict[str, Any]]:
+        """Check for nonsense, incomplete, or non-SAMM queries before calling Ollama"""
+        query_lower = query.lower().strip()
+        query_words = query_lower.split()
+        
+        print(f"[IntentAgent] Checking special cases for: '{query[:50]}...'")
+        
+        # 1. CHECK FOR NONSENSE/GIBBERISH
+        # Count nonsense keywords
+        nonsense_count = sum(1 for keyword in self.special_case_patterns["nonsense_keywords"] 
+                            if keyword in query_lower)
+        
+        # Check for excessive symbols/punctuation
+        # Check for excessive symbols/punctuation (exclude normal punctuation)
+        normal_chars = set('abcdefghijklmnopqrstuvwxyz0123456789 ?.!,;:\'-')
+        unusual_symbol_count = sum(1 for c in query_lower if c not in normal_chars)
+        unusual_symbol_ratio = unusual_symbol_count / max(len(query), 1)
+        
+        # Check for excessive numbers
+        number_count = sum(1 for c in query if c.isdigit())
+        number_ratio = number_count / max(len(query), 1)
+        
+        # Check for random letter sequences (keyboard mashing)
+        has_keyboard_mash = any(
+            len(set(word)) == len(word) and len(word) > 12  # All unique letters, 12+ chars
+            for word in query_words
+            if word.isalpha()  # Only check alphabetic words
+        )
+        
+        if nonsense_count >= 2 or unusual_symbol_ratio > 0.2 or number_ratio > 0.7 or has_keyboard_mash:
+            print(f"[IntentAgent] NONSENSE detected (keywords: {nonsense_count}, unusual_symbols: {unusual_symbol_ratio:.2f})")
+            return {
+                "intent": "nonsense",
+                "confidence": 0.95,
+                "entities_mentioned": [],
+                "reason": "gibberish_detected",
+                "special_case": True
+            }
+        
+        # 2. CHECK FOR INCOMPLETE/VAGUE QUERIES
+        # Very short queries with vague phrases
+        if len(query_words) <= 5:
+            for phrase in self.special_case_patterns["incomplete_phrases"]:
+                if phrase in query_lower:
+                    print(f"[IntentAgent] INCOMPLETE detected (phrase: '{phrase}')")
+                    return {
+                        "intent": "incomplete",
+                        "confidence": 0.9,
+                        "entities_mentioned": [],
+                        "reason": "vague_or_incomplete",
+                        "special_case": True
+                    }
+        
+        # Fragment detection (only 2-3 words, no question words)
+        question_words = ["what", "who", "when", "where", "why", "how", "does", "is", "are", "can"]
+        if len(query_words) <= 3 and not any(qw in query_words for qw in question_words):
+            if not query.strip().endswith("?"):  # Not even a question
+                print(f"[IntentAgent] INCOMPLETE detected (fragment: {len(query_words)} words)")
+                return {
+                    "intent": "incomplete",
+                    "confidence": 0.85,
+                    "entities_mentioned": [],
+                    "reason": "fragment",
+                    "special_case": True
+                }
+        
+        # 3. CHECK FOR NON-SAMM TOPICS
+        # Count non-SAMM topic matches
+        non_samm_matches = []
+        for topic in self.special_case_patterns["non_samm_topics"]:
+            if topic in query_lower:
+                non_samm_matches.append(topic)
+        
+        if non_samm_matches:
+            print(f"[IntentAgent] NON-SAMM detected (topics: {non_samm_matches})")
+            return {
+                "intent": "non_samm",
+                "confidence": 0.9,
+                "entities_mentioned": [],
+                "reason": "outside_samm_scope",
+                "special_case": True,
+                "detected_topics": non_samm_matches
+            }
+        
+        print(f"[IntentAgent] No special cases detected - proceeding with normal analysis")
+        return None  # No special case detected
     
     @time_function
     def analyze_intent(self, query: str) -> Dict[str, Any]:
-        # Check if we have learned patterns from previous feedback
+        # STEP 1: Check for special cases FIRST (before calling Ollama)
+        special_case = self._check_special_cases(query)
+        if special_case:
+            print(f"[IntentAgent] Returning special case: {special_case['intent']}")
+            return special_case
+    
+    # STEP 2: Normal SAMM intent analysis (existing logic unchanged)
+    # Check if we have learned patterns from previous feedback
         enhanced_system_msg = self._build_enhanced_system_message()
-        
+    
         prompt = f"Analyze this SAMM query and determine intent: {query}"
-        
+    
         try:
             response = call_ollama_enhanced(prompt, enhanced_system_msg, temperature=0.0)
             # Try to parse JSON response
             if "{" in response and "}" in response:
                 json_part = response[response.find("{"):response.rfind("}")+1]
                 result = json.loads(json_part)
-                
+            
                 # Apply any learned corrections from HIL feedback
                 result = self._apply_hil_corrections(query, result)
                 return result
@@ -1180,16 +1240,61 @@ class IntegratedEntityAgent:
         
         print("[IntegratedEntityAgent] Initialization complete")
     @time_function
-    def extract_and_retrieve(self, query: str, intent_info: Dict) -> Dict[str, Any]:
+    def extract_and_retrieve(self, query: str, intent_info: Dict, documents_context: List = None) -> Dict[str, Any]:
         """
         Main method for integrated entity extraction and database retrieval
+        NOW WITH FILE CONTENT EXTRACTION
         """
         print(f"[IntegratedEntityAgent] Processing query: '{query}' with intent: {intent_info.get('intent', 'unknown')}")
+
+
         
+        # ✅ CRITICAL: ALWAYS log file status at entry point
+        if documents_context:
+            print(f"[IntegratedEntityAgent] 📁 RECEIVED {len(documents_context)} FILES")
+            for idx, doc in enumerate(documents_context[:3], 1):
+                fname = doc.get('fileName', 'Unknown')
+                content_len = len(doc.get('content', ''))
+                has_content = len(doc.get('content', '')) > 50
+                print(f"[IntegratedEntityAgent]   File {idx}: {fname} ({content_len} chars) - {'✅ READY' if has_content else '⚠️ INSUFFICIENT'}")
+        else:
+            print(f"[IntegratedEntityAgent] ⚠️ WARNING: No files provided (documents_context is None/empty)")
+
         try:
-            # Phase 1: Enhanced entity extraction
+            # Phase 1: Enhanced entity extraction FROM QUERY
             entities = self._extract_entities_enhanced(query, intent_info)
-            print(f"[IntegratedEntityAgent] Extracted entities: {entities}")
+            print(f"[IntegratedEntityAgent] Extracted entities from query: {entities}")
+            
+            # === NEW: Phase 1.5 - Extract entities from CASE FILES ===
+            file_entities = []
+            file_relationships = []
+            if documents_context:
+                print(f"[IntegratedEntityAgent] Processing {len(documents_context)} case files")
+                for doc in documents_context[:3]:  # Limit to 3 files
+                    content = doc.get('content', '')
+                    filename = doc.get('fileName', 'Unknown')
+                    if content and len(content) > 50:
+                        print(f"[IntegratedEntityAgent] Extracting from file: {filename}")
+                        
+                        # Extract entities from file content
+                        file_ents = self._extract_entities_from_text(content, filename)
+                        file_entities.extend(file_ents)
+                        
+                        # Extract relationships from file content
+                        file_rels = self._extract_relationships_from_text(content, filename)
+                        file_relationships.extend(file_rels)
+                
+                # Merge file entities with query entities
+                entities.extend(file_entities)
+                entities = list(dict.fromkeys(entities))  # Remove duplicates
+                print(f"[IntegratedEntityAgent] Total entities after file extraction: {len(entities)}")
+                
+                # Save file knowledge for future reuse
+                if file_entities or file_relationships:
+                    for doc in documents_context[:3]:
+                        filename = doc.get('fileName', 'Unknown')
+                        self._save_file_knowledge_to_dynamic(file_entities, file_relationships, filename)
+            # === END NEW ===
             
             # Phase 2: Query all data sources
             all_results = {
@@ -1203,15 +1308,16 @@ class IntegratedEntityAgent:
                 "relationships": [],
                 "confidence_scores": {},
                 "overall_confidence": 0.0,
-                "extraction_method": "integrated_database_enhanced",
-                "extraction_phases": ["pattern_matching", "nlp_extraction", "database_queries"],
-                "phase_count": 3
+                "extraction_method": "integrated_database_enhanced_with_files",
+                "extraction_phases": ["pattern_matching", "nlp_extraction", "file_extraction", "database_queries"],
+                "phase_count": 4,
+                "file_entities_found": len(file_entities),
+                "file_relationships_found": len(file_relationships)
             }
             
             # Query each source with error handling
             cosmos_results = self._safe_query_cosmos(query, entities)
             vector_results = self._safe_query_vector(query)
-            vector_ttl_results = self._safe_query_vector_ttl(query)
             
             all_results["data_sources"] = {
                 "cosmos_gremlin": {
@@ -1223,16 +1329,38 @@ class IntegratedEntityAgent:
                     "results": vector_results,
                     "count": len(vector_results),
                     "status": "success" if vector_results else "no_results"
-                },
-                "vector_db_ttl": {
-                    "results": vector_ttl_results,
-                    "count": len(vector_ttl_results),
-                    "status": "success" if vector_ttl_results else "no_results"
                 }
+            }
+
+            # Store results for use in entity context and text sections
+            self.last_retrieval_results = {
+                'vector_db': vector_results,
+                'cosmos': cosmos_results
             }
             
             # Phase 3: Generate enhanced context from all sources
             self._populate_enhanced_context(all_results, entities)
+            
+            # === NEW: Add file relationships to results ===
+            if file_relationships:
+                all_results["relationships"].extend(file_relationships)
+                print(f"[IntegratedEntityAgent] Added {len(file_relationships)} relationships from files")
+            # === END NEW ===
+            
+            print(f"\n{'='*80}")
+            print(f"[DEBUG] VECTOR DB RESULTS ANALYSIS")
+            print(f"{'='*80}")
+            if 'vector_db' in all_results["data_sources"] and all_results["data_sources"]["vector_db"]["results"]:
+                vector_results = all_results["data_sources"]["vector_db"]["results"]
+                print(f"Total Vector DB results: {len(vector_results)}\n")
+                for i, result in enumerate(vector_results, 1):
+                    content = result.get('content', '')
+                    print(f"[Vector Result {i}]")
+                    print(f"  Length: {len(content)} chars")
+                    print(f"  Preview: {content[:300]}...")
+                    print(f"  Similarity: {result.get('similarity_score', 'N/A')}")
+                    print()
+            print(f"{'='*80}\n")
             
             print(f"[IntegratedEntityAgent] Query complete: {len(entities)} entities, multiple data sources")
             return all_results
@@ -1252,7 +1380,6 @@ class IntegratedEntityAgent:
                 "extraction_method": "integrated_database_enhanced_error",
                 "total_results": 0
             }
-    
     def _safe_query_cosmos(self, query: str, entities: List[str]) -> List[Dict]:
         """Safely query Cosmos Gremlin DB"""
         try:
@@ -1266,18 +1393,11 @@ class IntegratedEntityAgent:
         """Safely query Vector DB"""
         try:
             print("[IntegratedEntityAgent] Querying Vector DB...")
-            return self.db_manager.query_vector_db(query)
+            import traceback
+            traceback.print_exc()
+            return self.db_manager.query_vector_db(query, collection_name="samm_all")
         except Exception as e:
             print(f"[IntegratedEntityAgent] Vector DB query failed: {e}")
-            return []
-    
-    def _safe_query_vector_ttl(self, query: str) -> List[Dict]:
-        """Safely query Vector DB TTL"""
-        try:
-            print("[IntegratedEntityAgent] Querying Vector DB TTL...")
-            return self.db_manager.query_vector_db_ttl(query)
-        except Exception as e:
-            print(f"[IntegratedEntityAgent] Vector DB TTL query failed: {e}")
             return []
     
     def _extract_entities_enhanced(self, query: str, intent_info: Dict) -> List[str]:
@@ -1309,6 +1429,89 @@ class IntegratedEntityAgent:
         entities = list(dict.fromkeys(entities))[:5]  # Limit to 5 entities
         return entities
     
+    def _extract_entities_from_text(self, text: str, source_file: str) -> List[str]:
+        """Extract entities from case file content"""
+        entities = []
+        text_lower = text.lower()
+        
+        # Pattern matching in file content
+        for category, patterns in self.samm_entity_patterns.items():
+            for pattern in patterns:
+                if pattern.lower() in text_lower:
+                    entities.append(pattern)
+        
+        # Extract case-specific entities
+        countries = re.findall(r'\b(Taiwan|Israel|Japan|South Korea|Australia|Saudi Arabia|UAE|Poland|Romania|Ukraine|Republic of Korea)\b', text, re.IGNORECASE)
+        entities.extend(countries)
+        
+        equipment = re.findall(r'\b(F-\d{2}[A-Z]?|AH-\d{2}[A-Z]?|CH-\d{2}[A-Z]?|M1A\d|HIMARS|Patriot|THAAD|Javelin|Stinger|AN/[A-Z]+-\d+)\b', text)
+        entities.extend(equipment)
+        
+        dollar_values = re.findall(r'\$[\d,]+(?:\.\d{2})?(?:\s?(?:million|billion|M|B))?', text, re.IGNORECASE)
+        entities.extend([f"Value: {val}" for val in dollar_values[:3]])
+        
+        case_numbers = re.findall(r'(FMS|FMF|IMET)-\d{4}-[A-Z]{2,4}-\d{3,4}', text)
+        entities.extend(case_numbers)
+        
+        entities = list(dict.fromkeys(entities))
+        print(f"[FileExtraction] Extracted {len(entities)} entities from {source_file}")
+        return entities
+
+    def _extract_relationships_from_text(self, text: str, source_file: str) -> List[str]:
+        """Extract relationships from case file content"""
+        relationships = []
+        
+        relationship_patterns = [
+            (r'(\w+)\s+(?:directs|administers|supervises|manages|oversees)\s+(\w+)', 'directs'),
+            (r'(\w+)\s+is responsible for\s+(\w+)', 'responsible_for'),
+            (r'(\w+)\s+coordinates with\s+(\w+)', 'coordinates_with'),
+            (r'(\w+)\s+reports to\s+(\w+)', 'reports_to'),
+            (r'(\w+)\s+approves\s+(\w+)', 'approves'),
+        ]
+        
+        for pattern, rel_type in relationship_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches[:5]:
+                if len(match) == 2:
+                    relationship = f"{match[0]} {rel_type} {match[1]} (from {source_file})"
+                    relationships.append(relationship)
+        
+        print(f"[FileExtraction] Extracted {len(relationships)} relationships from {source_file}")
+        return relationships
+
+    def _save_file_knowledge_to_dynamic(self, entities: List[str], relationships: List[str], source_file: str):
+        """Save extracted file entities and relationships to dynamic knowledge"""
+        timestamp = datetime.now().isoformat()
+        
+        for entity in entities:
+            if entity not in self.dynamic_knowledge["entities"]:
+                self.dynamic_knowledge["entities"][entity] = {
+                    "definition": f"Entity extracted from case file: {source_file}",
+                    "source": "case_file_extraction",
+                    "source_file": source_file,
+                    "added_date": timestamp,
+                    "type": "file_extracted"
+                }
+        
+        for relationship in relationships:
+            rel_dict = {
+                "relationship": relationship,
+                "source": "case_file_extraction",
+                "source_file": source_file,
+                "added_date": timestamp
+            }
+            if rel_dict not in self.dynamic_knowledge["relationships"]:
+                self.dynamic_knowledge["relationships"].append(rel_dict)
+        
+        print(f"[DynamicKnowledge] Saved {len(entities)} entities and {len(relationships)} relationships")
+
+
+
+
+
+
+
+
     def _extract_nlp_entities_safe(self, query: str, intent_info: Dict) -> List[str]:
         """Safer NLP entity extraction"""
         system_msg = """Extract SAMM entities from the query. Return ONLY a simple JSON array.
@@ -1491,69 +1694,28 @@ Provide SAMM Chapter 1 context for this entity:"""
         }
     
     def _get_enhanced_text_sections(self, query: str, entities: List[str]) -> List[str]:
-        """Get relevant SAMM text sections based on entities and query"""
+        """Get relevant SAMM text sections from VECTOR DB RESULTS"""
         text_sections = []
-        
-        # Entity-specific text sections
-        for entity in entities:
-            entity_lower = entity.lower()
-            
-            if "dsca" in entity_lower or "defense security cooperation agency" in entity_lower:
-                text_sections.append(
-                    "C1.3.2.2 DSCA: Defense Security Cooperation Agency directs, "
-                    "administers, and provides guidance to DoD Components for the "
-                    "execution of DoD SC programs."
-                )
-            
-            elif "security assistance" in entity_lower:
-                text_sections.append(
-                    "C1.1.2.2 Security Assistance: SA is a group of programs, "
-                    "authorized under Title 22 authorities, by which the United States "
-                    "provides defense articles, military education and training, and "
-                    "other defense-related services."
-                )
-            
-            elif "security cooperation" in entity_lower:
-                text_sections.append(
-                    "C1.1.1 Definition: Security cooperation (SC) comprises all activities "
-                    "undertaken by the DoD to encourage and enable international partners "
-                    "to work with the United States to achieve strategic objectives."
-                )
-            
-            elif "dfas" in entity_lower or "defense finance and accounting service" in entity_lower:
-                text_sections.append(
-                    "C1.3.2.8 DFAS: Defense Finance and Accounting Service performs "
-                    "accounting, billing, disbursing, and collecting functions for SC programs."
-                )
-            
-            elif "department of state" in entity_lower or "dos" in entity_lower:
-                text_sections.append(
-                    "C1.3.1 Department of State: Under the FAA, AECA, and Executive Order 13637, "
-                    "the Secretary of State is responsible for continuous supervision and "
-                    "general direction of SA programs."
-                )
-            
-            elif "implementing agency" in entity_lower or "ia" in entity_lower:
-                text_sections.append(
-                    "C1.3.2.6 Implementing Agencies: An IA is the MILDEP organization or "
-                    "defense agency responsible for the execution of SC programs and overall "
-                    "management of delivery."
-                )
-        
-        # Intent-based text sections
-        query_lower = query.lower()
-        if "difference" in query_lower or "distinction" in query_lower:
-            text_sections.append(
-                "Key Distinction: Security Assistance programs are a SUBSET of Security "
-                "Cooperation programs. SC is broader and includes all DoD activities with "
-                "foreign partners, while SA is specifically those activities authorized under Title 22."
-            )
-        
-        # Remove duplicates and limit to top 3
-        text_sections = list(dict.fromkeys(text_sections))[:3]
-        
-        print(f"[IntegratedEntityAgent] Retrieved {len(text_sections)} text sections")
+    
+        # Check if we have vector DB results stored
+        if not hasattr(self, 'last_retrieval_results'):
+            print("[IntegratedEntityAgent] No retrieval results available")
+            return text_sections
+    
+        results = self.last_retrieval_results
+    
+        # Extract text from Vector DB results
+        if 'vector_db' in results and results['vector_db'] is not None:
+            vector_db_results = results['vector_db']
+            print(f"[IntegratedEntityAgent] Processing {len(results['vector_db'])} vector DB results")
+            for i, result in enumerate(results['vector_db'], 1):
+                content = result.get('content', '')
+                if content:
+                    text_sections.append(content)
+                    print(f"[DEBUG] Vector DB result {i}: {content[:200]}...")
+
         return text_sections
+    
     
     def _get_comprehensive_relationships(self, entities: List[str], data_sources: Dict) -> List[str]:
         """Get comprehensive relationships from all sources"""
@@ -1574,10 +1736,11 @@ Provide SAMM Chapter 1 context for this entity:"""
                 # Get relationships for this entity
                 if entity_id:
                     entity_rels = self.knowledge_graph.get_relationships(entity_id)
-                    for rel in entity_rels:
-                        rel_text = f"{rel['source']} {rel['relationship']} {rel['target']}"
-                        relationships.append(rel_text)
-                        print(f"[IntegratedEntityAgent] Knowledge graph relationship: {rel_text}")
+                    if entity_rels is not None:
+                        for rel in entity_rels:
+                            rel_text = f"{rel['source']} {rel['relationship']} {rel['target']}"
+                            relationships.append(rel_text)
+                            print(f"[IntegratedEntityAgent] Knowledge graph relationship: {rel_text}")
         
         # Add predefined relationships
         for entity in entities:
@@ -1818,13 +1981,13 @@ class EnhancedAnswerAgent:
         
         # Response length guidelines by intent
         self.length_guidelines = {
-            "definition": {"min": 100, "target": 200, "max": 400},
-            "distinction": {"min": 150, "target": 300, "max": 500},
-            "authority": {"min": 120, "target": 250, "max": 400},
-            "organization": {"min": 100, "target": 220, "max": 350},
-            "factual": {"min": 80, "target": 150, "max": 300},
-            "relationship": {"min": 120, "target": 200, "max": 400},
-            "general": {"min": 100, "target": 200, "max": 400}
+            "definition": {"min": 50, "target": 150, "max": 250},
+            "distinction": {"min": 100, "target": 200, "max": 350},
+            "authority": {"min": 80, "target": 150, "max": 250},
+            "organization": {"min": 80, "target": 150, "max": 250},
+            "factual": {"min": 50, "target": 100, "max": 200},
+            "relationship": {"min": 80, "target": 150, "max": 250},
+            "general": {"min": 80, "target": 150, "max": 250}
         }
         
         print("[EnhancedAnswerAgent] Initialization complete")
@@ -1837,12 +2000,23 @@ class EnhancedAnswerAgent:
         """
         Main method for enhanced answer generation with ITAR compliance filtering
         """
+        # ✅ CRITICAL: ALWAYS log file status at entry point
+        if documents_context:
+            print(f"[AnswerAgent] 📁 RECEIVED {len(documents_context)} FILES for answer generation")
+            for idx, doc in enumerate(documents_context[:3], 1):
+                fname = doc.get('fileName', 'Unknown')
+                content_len = len(doc.get('content', ''))
+                has_content = len(doc.get('content', '')) > 50
+                print(f"[AnswerAgent]   File {idx}: {fname} ({content_len} chars) - {'✅ READY' if has_content else '⚠️ INSUFFICIENT'}")
+        else:
+            print(f"[AnswerAgent] ⚠️ WARNING: No files provided for answer generation")
+                
         intent = intent_info.get("intent", "general")
         confidence = intent_info.get("confidence", 0.5)
         
         print(f"[Enhanced AnswerAgent] Generating answer for intent: {intent} (confidence: {confidence:.2f})")
         print(f"[DEBUG] Checking Navy FMS: intent={intent}, navy in query={('navy' in query.lower())}, fms in query={('fms' in query.lower())}")
-        if intent_info.get("intent") == "authority" and "navy" in user_input.lower() and "fms" in user_input.lower():
+        if intent_info.get("intent") == "authority" and "navy" in query.lower() and "fms" in query.lower():
                 print("[AnswerAgent] Navy FMS question detected - returning verified answer")
                 return """**Authority Holder:** Defense Security Cooperation Agency (DSCA)
 **Scope of Authority:** DSCA directs, administers, and provides guidance to DoD Components for the execution of Navy Foreign Military Sales (FMS) programs.
@@ -1987,7 +2161,26 @@ class EnhancedAnswerAgent:
                 context_parts.append("\n=== ENTITY RELATIONSHIPS ===")
                 # Limit to most relevant relationships
                 context_parts.extend(entity_info["relationships"][:3])
-            
+            # === NEW: Add HIL corrections as context ===
+            if hasattr(self, 'answer_corrections') and len(self.answer_corrections) > 0:
+                context_parts.append("\n=== PREVIOUS CORRECT ANSWERS (HIL) ===")
+                for correction_key, correction in list(self.answer_corrections.items())[-3:]:
+                    corrected_answer = correction.get('corrected_answer', '')
+                    original_query = correction.get('original_query', 'Unknown query')
+                    if len(corrected_answer) > 50:
+                        truncated = corrected_answer[:400] + "..." if len(corrected_answer) > 400 else corrected_answer
+                        context_parts.append(f"Q: {original_query[:100]}\nCorrect Answer: {truncated}\n")
+                        print(f"[AnswerAgent] Added HIL correction to context")
+
+            # === NEW: Add case file relationships ===
+            if entity_info.get("file_relationships_found", 0) > 0:
+                context_parts.append("\n=== CASE FILE RELATIONSHIPS ===")
+                file_rels = [rel for rel in entity_info.get("relationships", []) if "from" in rel]
+                for rel in file_rels[:5]:
+                    context_parts.append(f"• {rel}")
+                print(f"[AnswerAgent] Added {len(file_rels[:5])} file relationships to context")
+
+
             # === NEW: Add uploaded document content ===
             if documents_context:
                 context_parts.append("\n=== UPLOADED DOCUMENT CONTENT ===")
@@ -2037,8 +2230,17 @@ CRITICAL REQUIREMENTS:
 - Use exact SAMM terminology and definitions from the context
 - Always cite specific SAMM sections (e.g., "SAMM C1.3.2.2")
 - Expand acronyms on first use (e.g., "Defense Security Cooperation Agency (DSCA)")
-- Distinguish between Security Cooperation and Security Assistance
-- Remember: SA is a SUBSET of SC, not the same thing
+
+🔴 CRITICAL HIERARCHY RULE - READ CAREFULLY:
+- Security Cooperation (SC) is the BROAD umbrella term
+- Security Assistance (SA) is a SUBSET/PART OF Security Cooperation
+- SC INCLUDES SA (not the other way around!)
+- NEVER say "SC is a subset of SA" or "SC is a type of SA"
+- ALWAYS say "SA is a subset of SC" or "SC includes SA"
+- Think: SC is the BIG category, SA is ONE PART of it
+- SC = All DoD interactions with foreign partners (BROAD)
+- SA = Specific programs under Title 22 (NARROW)
+
 - Provide clear, complete definitions that could stand alone
 
 RESPONSE STRUCTURE:
@@ -2054,7 +2256,15 @@ CRITICAL REQUIREMENTS:
 - Highlight key differences clearly and systematically
 - Explain legal authority differences (Title 10 vs Title 22)
 - Use specific examples when possible
-- Always emphasize that Security Assistance is a subset of Security Cooperation
+
+🔴 WHEN COMPARING SC AND SA:
+- Security Cooperation (SC) = BROAD umbrella covering ALL DoD interactions
+- Security Assistance (SA) = NARROW subset of SC with specific Title 22 programs
+- ALWAYS state: "SA is a subset of SC" (NEVER reverse this!)
+- SC is authorized under Title 10 (broad DoD authority)
+- SA is authorized under Title 22 (specific State Dept programs)
+- Think of it like: SC is the ocean, SA is one specific current in that ocean
+
 - Cite relevant SAMM sections for each concept being compared
 - Address common misconceptions
 
@@ -2329,13 +2539,20 @@ CRITICAL REQUIREMENTS:
             # Skip enhancement if answer is too short or contains errors
             if len(answer) < 20 or "Error" in answer:
                 return answer
-            
-            # Step 1: Add section references if missing critical ones
+
+            # Step 1: Add section reference if missing → take it from retriever top-k
             if not re.search(self.quality_patterns["section_references"], enhanced_answer):
-                entities = entity_info.get("entities", [])
-                if entities and any(entity in ["DSCA", "Security Assistance", "Security Cooperation"] for entity in entities):
-                    enhanced_answer += "\n\nRefer to relevant SAMM Chapter 1 sections for complete details."
-            
+                vr = (entity_info or {}).get("vector_result") or (entity_info or {}).get("retriever_result") or {}
+                metas = (vr.get("metadatas", [[]]) or [[]])[0]
+
+                secs = [ (m or {}).get("section_reference") for m in metas if (m or {}).get("section_reference") ]
+                if secs:
+                    # pick the most frequent section among top-k (stable) or fall back to the first
+                    from collections import Counter
+                    picked = Counter(secs).most_common(1)[0][0]
+                    enhanced_answer += f"\n\nSAMM Section Citation: {picked}"
+                    print("[CITE DBG]", {"picked": picked, "from": "retriever", "topk_secs": secs[:5]})
+
             # Step 2: Expand acronyms that appear without expansion (limit to prevent overprocessing)
             acronyms_found = re.findall(self.quality_patterns["acronym_detection"], enhanced_answer)
             
@@ -2652,6 +2869,11 @@ class SimpleStateOrchestrator:
             current_step=WorkflowStep.INIT.value,
             error=None
         )
+        # ✅ ADD THESE 3 LINES HERE:
+        print(f"[DEBUG PROCESS_QUERY] Received documents_context: {documents_context is not None}")
+        print(f"[DEBUG PROCESS_QUERY] documents_context type: {type(documents_context)}")
+        print(f"[DEBUG PROCESS_QUERY] documents_context length: {len(documents_context) if documents_context else 0}")
+    
         state['user_profile'] = user_profile or {"authorization_level": DEFAULT_DEV_AUTH_LEVEL}
         try:
             # Execute workflow
@@ -2695,7 +2917,6 @@ class SimpleStateOrchestrator:
                     "database_integration": {
                         "cosmos_gremlin": db_manager.cosmos_gremlin_client is not None,
                         "vector_db": db_manager.vector_db_client is not None,
-                        "vector_db_ttl": db_manager.vector_db_ttl_client is not None,
                         "embedding_model": db_manager.embedding_model is not None
                     },
                     # Add HIL and trigger update status
@@ -2835,7 +3056,6 @@ class SimpleStateOrchestrator:
         print(f"[State Orchestrator] Initialized query: '{state['query']}'")
         return state
     
-    
     def _analyze_intent_step(self, state: AgentState) -> AgentState:
         """Execute intent analysis step"""
         try:
@@ -2846,23 +3066,141 @@ class SimpleStateOrchestrator:
             state['error'] = f"Intent analysis failed: {str(e)}"
         return state
     
+    @time_function
+    def analyze_intent(self, query: str) -> Dict[str, Any]:
+        # STEP 1: Check for special cases FIRST (before calling Ollama)
+        special_case = self._check_special_cases(query)
+        if special_case:
+            print(f"[IntentAgent] Returning special case: {special_case['intent']}")
+            return special_case
+        
+        # STEP 2: Normal SAMM intent analysis (existing logic unchanged)
+        # Check if we have learned patterns from previous feedback
+        enhanced_system_msg = self._build_enhanced_system_message()
+        
+        prompt = f"Analyze this SAMM query and determine intent: {query}"
+        
+        try:
+            response = call_ollama_enhanced(prompt, enhanced_system_msg, temperature=0.0)
+            # Try to parse JSON response
+            if "{" in response and "}" in response:
+                json_part = response[response.find("{"):response.rfind("}")+1]
+                result = json.loads(json_part)
+                
+                # Apply any learned corrections from HIL feedback
+                result = self._apply_hil_corrections(query, result)
+                return result
+            else:
+                return {"intent": "general", "confidence": 0.5, "entities_mentioned": []}
+        except:
+            return {"intent": "general", "confidence": 0.5, "entities_mentioned": []}
+
+    @time_function
+
     def _extract_entities_step(self, state: AgentState) -> AgentState:
         """Execute integrated entity extraction with database queries"""
+        # NEW DEBUG LINES - ADD THESE 3 LINES:
+        print(f"[DEBUG STATE] documents_context exists: {'documents_context' in state}")
+        print(f"[DEBUG STATE] documents_context value: {state.get('documents_context', 'NOT FOUND')}")
+        print(f"[DEBUG STATE] documents_context length: {len(state.get('documents_context', [])) if state.get('documents_context') else 0}")
+    
+
+        
+        # ✅ EXISTING: Skip entity extraction for special cases
+        if state['intent_info'].get('special_case', False):
+            print(f"[State Orchestrator] Skipping entity extraction for special case: {state['intent_info'].get('intent')}")
+            state['entity_info'] = {
+                'entities': [],
+                'context': [],
+                'relationships': [],
+                'special_case_skip': True
+            }
+            state['execution_steps'].append("Entity extraction skipped (special case)")
+            return state
+        
         try:
-            state['entity_info'] = self.entity_agent.extract_and_retrieve(state['query'], state['intent_info'])
+            # ✅ ADDED: Get documents from state (safe - defaults to None if not present)
+            documents_context = state.get('documents_context', None)
+            
+            # ✅ ADDED: Log file status for debugging
+            if documents_context:
+                print(f"[State Orchestrator] 📁 Passing {len(documents_context)} files to entity extraction")
+                for idx, doc in enumerate(documents_context[:3], 1):
+                    fname = doc.get('fileName', 'Unknown')
+                    content_len = len(doc.get('content', ''))
+                    print(f"[State Orchestrator]   File {idx}: {fname} ({content_len} chars)")
+            else:
+                print(f"[State Orchestrator] No files in state to pass to entity extraction")
+            
+            # ✅ FIXED: Now passes documents_context (was missing before)
+            state['entity_info'] = self.entity_agent.extract_and_retrieve(
+                state['query'], 
+                state['intent_info'],
+                documents_context  # ← ADDED THIS PARAMETER
+            )
+            
+            # ✅ EXISTING: Get entity extraction stats
             entities_count = len(state['entity_info'].get('entities', []))
             confidence = state['entity_info'].get('overall_confidence', 0)
             db_results = state['entity_info'].get('total_results', 0)
             phases = state['entity_info'].get('phase_count', 0)
-            state['execution_steps'].append(f"Integrated entity extraction: {entities_count} entities found (confidence: {confidence:.2f}, DB results: {db_results}, phases: {phases})")
-            print(f"[State Orchestrator] Integrated Entities: {entities_count} entities found through {phases} phases with {db_results} database results")
+            
+            # ✅ ADDED: Get file-related stats (safe - defaults to 0 if not present)
+            files_processed = state['entity_info'].get('files_processed', 0)
+            file_entities = state['entity_info'].get('file_entities_found', 0)
+            file_relationships = state['entity_info'].get('file_relationships_found', 0)
+            
+            # ✅ ENHANCED: Include file stats in execution step message
+            state['execution_steps'].append(
+                f"Integrated entity extraction: {entities_count} entities found "
+                f"(confidence: {confidence:.2f}, DB results: {db_results}, phases: {phases}, "
+                f"files: {files_processed}, file_entities: {file_entities}, file_rels: {file_relationships})"
+            )
+            
+            # ✅ ENHANCED: Include file stats in console log
+            print(f"[State Orchestrator] Integrated Entities: {entities_count} entities found "
+                f"through {phases} phases with {db_results} database results "
+                f"and {file_entities} entities from {files_processed} files")
+            
+            # ✅ ADDED: Log file-specific extraction details if files were processed
+            if files_processed > 0:
+                print(f"[State Orchestrator] 📊 File Extraction Results:")
+                print(f"[State Orchestrator]   • Files processed: {files_processed}")
+                print(f"[State Orchestrator]   • Entities from files: {file_entities}")
+                print(f"[State Orchestrator]   • Relationships from files: {file_relationships}")
+            
         except Exception as e:
+            # ✅ EXISTING: Error handling unchanged
             state['error'] = f"Integrated entity extraction failed: {str(e)}"
+            print(f"[State Orchestrator] ❌ Entity extraction error: {str(e)}")
+            
+            # ✅ ADDED: Add traceback for debugging
+            import traceback
+            print(f"[State Orchestrator] Error traceback:\n{traceback.format_exc()}")
+        
         return state
-    
+
+ 
+    @time_function
     def _generate_answer_step(self, state: AgentState) -> AgentState:
         """Execute enhanced answer generation step"""
         try:
+            state['answer'] = self.answer_agent.generate_answer(
+                state['query'], 
+                state['intent_info'], 
+                state['entity_info'], 
+                state['chat_history'], 
+                state['documents_context']
+            )
+            state['execution_steps'].append("Enhanced answer generated successfully with quality scoring")
+            print(f"[State Orchestrator] Enhanced answer generated ({len(state['answer'])} characters)")
+        except Exception as e:
+            state['error'] = f"Enhanced answer generation failed: {str(e)}"
+        return state
+    def _generate_answer_step(self, state: AgentState) -> AgentState:
+        """Execute enhanced answer generation step"""
+        try:
+            # Generate answer (handles special cases inside generate_answer)
             state['answer'] = self.answer_agent.generate_answer(
                 state['query'], 
                 state['intent_info'], 
@@ -2888,7 +3226,6 @@ class SimpleStateOrchestrator:
         state['answer'] = f"I apologize, but I encountered an error: {state['error']}"
         print(f"[State Orchestrator] Error handled: {state['error']}")
         return state
-
 
 
 @app.route("/api/query/stream", methods=["POST"])
@@ -2918,33 +3255,131 @@ def query_ai_assistant_stream():
         "role": user.get("role", "developer")
     }
     # === END ===
+    
+    # ✅ CRITICAL FIX: Load file content from blob storage BEFORE streaming starts
+    # Now with CORRECT container selection (case vs chat)
+    documents_with_content = []
+    if staged_chat_documents_metadata:
+        print(f"[Streaming] 📁 Loading content from {len(staged_chat_documents_metadata)} staged files...")
+        for idx, doc_meta in enumerate(staged_chat_documents_metadata, 1):
+            blob_name = doc_meta.get("blobName")
+            blob_container = doc_meta.get("blobContainer")  # ✅ ADDED: Get container type
+            file_name = doc_meta.get("fileName", "Unknown")
+            
+            if not blob_name:
+                print(f"[Streaming]   ⚠️ Missing blobName for {file_name}")
+                continue
+            
+            # ✅ CRITICAL FIX: Select correct container client based on metadata
+            container_client = None
+            if blob_container == AZURE_CASE_DOCS_CONTAINER_NAME:
+                container_client = case_docs_blob_container_client
+                print(f"[Streaming]   File {idx}: {file_name} (CASE container)")
+            elif blob_container == AZURE_CHAT_DOCS_CONTAINER_NAME:
+                container_client = chat_docs_blob_container_client
+                print(f"[Streaming]   File {idx}: {file_name} (CHAT container)")
+            else:
+                print(f"[Streaming]   ⚠️ Unknown container '{blob_container}' for {file_name}")
+            
+            if not container_client:
+                print(f"[Streaming]   ⚠️ Container client not available for {file_name}")
+                continue
+            
+            # Fetch content using the CORRECT container client
+            print(f"[Streaming]   Fetching file {idx}: {file_name} from {blob_container}")
+            content = fetch_blob_content(blob_name, container_client)
+            
+            if content:
+                documents_with_content.append({
+                    **doc_meta,
+                    "content": content[:5000]  # Limit to 5000 chars
+                })
+                print(f"[Streaming]   ✅ Loaded {len(content)} chars from {file_name}")
+            else:
+                print(f"[Streaming]   ⚠️ No content retrieved from {file_name}")
+        
+        print(f"[Streaming] 📊 Result: {len(documents_with_content)}/{len(staged_chat_documents_metadata)} files loaded successfully")
+    else:
+        print(f"[Streaming] No staged documents in request")
+    # ✅ END FILE LOADING
 
     def generate():
         try:
             start_time = time.time()
             
-            # START - Send immediately
-            yield f"data: {json.dumps({'type': 'start', 'query': user_input, 'timestamp': time.time()})}\n\n"
+            # START - Send immediately with file count
+            yield f"data: {json.dumps({'type': 'start', 'query': user_input, 'timestamp': time.time(), 'files_loaded': len(documents_with_content)})}\n\n"
             
             # STEP 1: Intent Analysis
             yield f"data: {json.dumps({'type': 'progress', 'step': 'intent_analysis', 'message': 'Analyzing query intent...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
-            
             intent_start = time.time()
             intent_info = orchestrator.intent_agent.analyze_intent(user_input)
             intent_time = round(time.time() - intent_start, 2)
-            
             yield f"data: {json.dumps({'type': 'intent_complete', 'data': intent_info, 'time': intent_time})}\n\n"
             
-            # STEP 2: Entity Extraction
-            yield f"data: {json.dumps({'type': 'progress', 'step': 'entity_extraction', 'message': 'Extracting entities and querying databases...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+            # === CHECK FOR SPECIAL CASES ===
+            if intent_info.get('special_case', False):
+                special_intent = intent_info.get('intent')
+                print(f"[Streaming] Special case detected: {special_intent} - skipping entity/compliance")
+                
+                yield f"data: {json.dumps({'type': 'progress', 'step': 'special_case_handling', 'message': f'Handling {special_intent} query...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+                
+                # Generate special case response
+                if special_intent == "nonsense":
+                    special_answer = """I apologize, but I'm having difficulty understanding your question. It appears to contain unclear or garbled text.
+
+Could you please rephrase your question more clearly? I'm here to help with questions about the Security Assistance Management Manual (SAMM) Chapter 1."""
+                
+                elif special_intent == "incomplete":
+                    special_answer = """I'd be happy to help, but I need more information to answer your question properly.
+
+Could you please provide more details about what specific SAMM topic you're asking about?"""
+                
+                elif special_intent == "non_samm":
+                    detected_topic = intent_info.get('detected_topics', ['this topic'])[0]
+                    special_answer = f"""Thank you for your question about {detected_topic}.
+
+However, this topic is **outside the scope of SAMM Chapter 1**, which focuses specifically on Security Cooperation and Security Assistance.
+
+Can I help you with any SAMM Chapter 1 topics instead?"""
+                
+                else:
+                    special_answer = "I apologize, but I cannot process this query. Please ask about SAMM Chapter 1 topics."
+                
+                # Stream the special case answer
+                yield f"data: {json.dumps({'type': 'answer_start', 'message': 'Sending response...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+                
+                for i, token in enumerate(special_answer.split()):
+                    yield f"data: {json.dumps({'type': 'answer_token', 'token': token + ' ', 'position': i+1})}\n\n"
+                
+                total_time = round(time.time() - start_time, 2)
+                yield f"data: {json.dumps({'type': 'complete', 'data': {'special_case': True, 'intent': special_intent, 'timings': {'total': total_time}}})}\n\n"
+                return
+            # === END SPECIAL CASE CHECK ===
+            
+            # STEP 2: Entity Extraction (only if NOT special case)
+            # ✅ ENHANCED: Include file count in progress message
+            file_msg = f" and {len(documents_with_content)} files" if documents_with_content else ""
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'entity_extraction', 'message': f'Extracting entities from query{file_msg}...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
             
             entity_start = time.time()
-            entity_info = orchestrator.entity_agent.extract_and_retrieve(user_input, intent_info)
+            # ✅ CRITICAL FIX: Pass documents_with_content (with actual content from CORRECT container)
+            entity_info = orchestrator.entity_agent.extract_and_retrieve(
+                user_input, 
+                intent_info,
+                documents_with_content  # ← FIXED: Now passes files with content from correct container
+            )
             entity_time = round(time.time() - entity_start, 2)
             
-            yield f"data: {json.dumps({'type': 'entities_complete', 'data': {'count': len(entity_info.get('entities', [])), 'entities': entity_info.get('entities', []), 'confidence': entity_info.get('overall_confidence', 0)}, 'time': entity_time})}\n\n"
+            # ✅ ADDED: Extract file stats
+            files_processed = entity_info.get('files_processed', 0)
+            file_entities = entity_info.get('file_entities_found', 0)
+            file_relationships = entity_info.get('file_relationships_found', 0)
             
-            # === STEP 3: ITAR COMPLIANCE CHECK (NEW) ===
+            # ✅ ENHANCED: Include file stats in entity completion message
+            yield f"data: {json.dumps({'type': 'entities_complete', 'data': {'count': len(entity_info.get('entities', [])), 'entities': entity_info.get('entities', []), 'confidence': entity_info.get('overall_confidence', 0), 'files_processed': files_processed, 'file_entities': file_entities, 'file_relationships': file_relationships}, 'time': entity_time})}\n\n"
+            
+            # === STEP 3: ITAR COMPLIANCE CHECK ===
             yield f"data: {json.dumps({'type': 'progress', 'step': 'compliance_check', 'message': 'Checking ITAR compliance...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
             
             compliance_start = time.time()
@@ -2975,48 +3410,17 @@ def query_ai_assistant_stream():
             # === END COMPLIANCE CHECK ===
             
             # STEP 4: Answer Generation (only if authorized)
-            yield f"data: {json.dumps({'type': 'progress', 'step': 'answer_generation', 'message': 'Generating answer...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
+            # ✅ ENHANCED: Include file context in progress message
+            file_context_msg = f" with {len(documents_with_content)} file(s)" if documents_with_content else ""
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'answer_generation', 'message': f'Generating answer{file_context_msg}...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
             
             answer_start = time.time()
             
-            # Build context
+            # Build context - ✅ CRITICAL FIX: Pass documents_with_content
             context = orchestrator.answer_agent._build_comprehensive_context(
-                user_input, intent_info, entity_info, chat_history, staged_chat_documents_metadata
+                user_input, intent_info, entity_info, chat_history, documents_with_content  # ← FIXED
             )
-            # Stream the answer
-            # Stream the answer
-            if intent_info.get("intent") == "authority" and "navy" in user_input.lower() and "fms" in user_input.lower():
-                print("[Streaming] Navy FMS question detected - using verified answer")
-                navy_fms_answer = """**Authority Holder:** Defense Security Cooperation Agency (DSCA)
-**Scope of Authority:** DSCA directs, administers, and provides guidance to DoD Components for the execution of Navy Foreign Military Sales (FMS) programs.
-
-**Legal Basis:** Section 36 of the Arms Export Control Act (AECA), as referenced in SAMM C1.3.2.2.
-
-**Delegation Chain:**
-1. Secretary of State - Title 22 supervision
-2. Secretary of Defense - Title 10 implementation  
-3. DSCA - directs SC programs including Navy FMS
-4. NIPO (Navy International Programs Office) - executes Navy FMS cases
-
-**Summary:** DSCA is responsible for directing Navy FMS cases under Section 36 AECA."""
-                
-                # Stream the answer (CORRECTED: use intent_info.get("intent") instead of intent variable)
-                yield f"data: {json.dumps({'type': 'answer_start', 'message': 'Streaming answer...', 'elapsed': round(time.time() - start_time, 2)})}\n\n"
-                
-                full_answer = navy_fms_answer
-                token_count = 0
-                
-                for token in navy_fms_answer.split():
-                    token_count += 1
-                    yield f"data: {json.dumps({'type': 'answer_token', 'token': token + ' ', 'position': token_count})}\n\n"
-                
-                answer_time = round(time.time() - answer_start, 2)
-                total_time = round(time.time() - start_time, 2)
-                
-                # FIXED: Use intent_info.get("intent") instead of undefined 'intent' variable
-                yield f"data: {json.dumps({'type': 'complete', 'data': {'compliance_approved': True, 'intent': intent_info.get('intent', 'authority'), 'entities_found': len(entity_info.get('entities', [])), 'answer_length': len(navy_fms_answer), 'token_count': token_count, 'timings': {'answer': answer_time, 'total': total_time}}})}\n\n"
-                return
-
+            
             intent = intent_info.get("intent", "general")
             system_msg = orchestrator.answer_agent._create_optimized_system_message(intent, context)
             prompt = orchestrator.answer_agent._create_enhanced_prompt(user_input, intent_info, entity_info)
@@ -3046,8 +3450,8 @@ def query_ai_assistant_stream():
             if enhanced_answer != full_answer:
                 yield f"data: {json.dumps({'type': 'answer_enhanced', 'enhanced_answer': enhanced_answer})}\n\n"
             
-            # Send completion with all metadata
-            yield f"data: {json.dumps({'type': 'complete', 'data': {'compliance_approved': True, 'intent': intent, 'entities_found': len(entity_info.get('entities', [])), 'answer_length': len(enhanced_answer), 'token_count': token_count, 'timings': {'intent': intent_time, 'entity': entity_time, 'compliance': compliance_time, 'answer': answer_time, 'total': total_time}}})}\n\n"
+            # ✅ ENHANCED: Send completion with file stats included
+            yield f"data: {json.dumps({'type': 'complete', 'data': {'compliance_approved': True, 'intent': intent, 'entities_found': len(entity_info.get('entities', [])), 'files_processed': files_processed, 'file_entities': file_entities, 'file_relationships': file_relationships, 'answer_length': len(enhanced_answer), 'token_count': token_count, 'timings': {'intent': intent_time, 'entity': entity_time, 'compliance': compliance_time, 'answer': answer_time, 'total': total_time}}})}\n\n"
             
         except Exception as e:
             import traceback
@@ -3664,7 +4068,6 @@ def get_system_status_for_ui():
         "database_integration": {
             "cosmos_gremlin": db_status["cosmos_gremlin"]["connected"],
             "vector_db": db_status["vector_db"]["connected"],
-            "vector_db_ttl": db_status["vector_db_ttl"]["connected"],
             "embedding_model": db_status["embedding_model"]["loaded"]
         },
         "cache": cache_stats_data,  # NEW: Cache statistics
@@ -3803,9 +4206,8 @@ def get_agents_status():
                 "database_features": {
                     "cosmos_gremlin_connected": database_status["cosmos_gremlin"]["connected"],
                     "vector_db_connected": database_status["vector_db"]["connected"],
-                    "vector_db_ttl_connected": database_status["vector_db_ttl"]["connected"],
                     "embedding_model_loaded": database_status["embedding_model"]["loaded"],
-                    "total_vector_collections": len(database_status["vector_db"]["collections"]) + len(database_status["vector_db_ttl"]["collections"])
+                    "total_vector_collections": len(database_status["vector_db"]["collections"]) 
                 },
                 "enhanced_features": {
                     "extraction_phases": agent_status["integrated_entity_agent"]["extraction_phases"],
@@ -3839,8 +4241,7 @@ def get_database_status():
                 "cosmos_gremlin_status": "connected" if database_status["cosmos_gremlin"]["connected"] else "disconnected",
                 "vector_databases": {
                     "vector_db_collections": len(database_status["vector_db"]["collections"]),
-                    "vector_db_ttl_collections": len(database_status["vector_db_ttl"]["collections"]),
-                    "total_collections": len(database_status["vector_db"]["collections"]) + len(database_status["vector_db_ttl"]["collections"])
+                    "total_collections": len(database_status["vector_db"]["collections"]) 
                 },
                 "embedding_model_status": "loaded" if database_status["embedding_model"]["loaded"] else "not_loaded"
             },
@@ -3889,10 +4290,6 @@ def get_samm_system_status():
                     "connected": database_status["vector_db"]["connected"],
                     "collections": database_status["vector_db"]["collections"]
                 },
-                "vector_db_ttl": {
-                    "connected": database_status["vector_db_ttl"]["connected"],
-                    "collections": database_status["vector_db_ttl"]["collections"]
-                }
             },
             "embedding_model": {
                 "loaded": database_status["embedding_model"]["loaded"],
@@ -3977,10 +4374,6 @@ def get_workflow_info():
                 "purpose": "Document vector search",
                 "query_type": "Semantic similarity search"
             },
-            "vector_db_ttl": {
-                "purpose": "TTL knowledge base search",
-                "query_type": "Semantic similarity search"
-            }
         },
         "transitions": {
             "initialize": "analyze_intent",
@@ -4127,7 +4520,6 @@ def get_knowledge_graph_info():
             },
             "vector_databases": {
                 "vector_db_collections": len(database_status["vector_db"]["collections"]),
-                "vector_db_ttl_collections": len(database_status["vector_db_ttl"]["collections"])
             },
             "embedding_model": {
                 "loaded": database_status["embedding_model"]["loaded"],
@@ -4160,7 +4552,6 @@ def health_check():
     database_healthy = any([
         database_status["cosmos_gremlin"]["connected"],
         database_status["vector_db"]["connected"],
-        database_status["vector_db_ttl"]["connected"]
     ])
     
     # Get cache stats
@@ -4184,7 +4575,6 @@ def health_check():
             "blob_storage": "healthy" if blob_service_client else "disabled",
             "cosmos_gremlin": "healthy" if database_status["cosmos_gremlin"]["connected"] else "disconnected",
             "vector_db": "healthy" if database_status["vector_db"]["connected"] else "disconnected",
-            "vector_db_ttl": "healthy" if database_status["vector_db_ttl"]["connected"] else "disconnected",
             "embedding_model": "healthy" if database_status["embedding_model"]["loaded"] else "not_loaded",
             "cache": "healthy" if cache_healthy else "disabled"  # NEW
         },
@@ -4237,7 +4627,6 @@ if __name__ == '__main__':
     print(f"\n💽 Database Integration:")
     print(f"• Cosmos Gremlin: {'Connected' if db_status['cosmos_gremlin']['connected'] else 'Disconnected'} ({db_status['cosmos_gremlin']['endpoint']})")
     print(f"• Vector DB: {'Connected' if db_status['vector_db']['connected'] else 'Disconnected'} ({len(db_status['vector_db']['collections'])} collections)")
-    print(f"• Vector DB TTL: {'Connected' if db_status['vector_db_ttl']['connected'] else 'Disconnected'} ({len(db_status['vector_db_ttl']['collections'])} collections)")
     print(f"• Embedding Model: {'Loaded' if db_status['embedding_model']['loaded'] else 'Not Loaded'} ({db_status['embedding_model']['model_name']})")
     
     print(f"\n📡 Core Endpoints:")

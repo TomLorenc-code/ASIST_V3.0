@@ -102,15 +102,15 @@ AZURE_CHAT_DOCS_CONTAINER_NAME = os.getenv("AZURE_CHAT_DOCS_CONTAINER_NAME")
 COSMOS_GREMLIN_CONFIG = {
     'endpoint': os.getenv("COSMOS_GREMLIN_ENDPOINT", "asist-graph-db.gremlin.cosmos.azure.com").replace('wss://', '').replace(':443/', ''),
     'database': os.getenv("COSMOS_GREMLIN_DATABASE", "ASIST-Agent-1.1DB"),
-    'graph': os.getenv("COSMOS_GREMLIN_COLLECTION", "AGENT1.1"),
+    'graph': os.getenv("COSMOS_GREMLIN_COLLECTION", "AGENT1.2"),
     'password': os.getenv("COSMOS_GREMLIN_KEY", "")
 }
 
 # Vector Database Configuration
-#VECTOR_DB_PATH = "C:\\Users\\ShaziaKashif\\ASIST Project\\Project Docs\\Input\\vector_db"
-VECTOR_DB_PATH = "C:\\Users\\TomLorenc\\Downloads\\ASIST_DEV\\ASIST_DEV\\backend\\vector_db"
+VECTOR_DB_PATH = "C:\\Users\\ShaziaKashif\\ASIST Project\\Project Docs\\Input\\samm_documents\\vector_db"
+#VECTOR_DB_PATH = "C:\\Users\\TomLorenc\\Downloads\\ASIST_DEV\\ASIST_DEV\\backend\\vector_db"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-VECTOR_DB_COLLECTION = "doc_collection_20251015_162733"
+VECTOR_DB_COLLECTION = "samm_all"
 
 # =============================================================================
 # CACHE CONFIGURATION
@@ -351,7 +351,7 @@ def call_ollama_streaming(prompt: str, system_message: str = "", temperature: fl
                 "top_k": 40,
                 "repeat_penalty": 1.1,
                 "num_ctx": 2048,
-                "num_predict": 200
+                "num_predict": 800
             }
         }
         
@@ -440,7 +440,7 @@ def call_ollama_enhanced(prompt: str, system_message: str = "", temperature: flo
                 "top_k": 40,
                 "repeat_penalty": 1.1,
                 "num_ctx": 2048,  # Optimized context window for Llama 3.2
-                "num_predict": 200  # Maximum tokens to generate
+                "num_predict": 800  # Maximum tokens to generate
             }
         }
         
@@ -662,7 +662,6 @@ class DatabaseManager:
     def __init__(self):
         self.cosmos_gremlin_client = None
         self.vector_db_client = None
-        self.vector_db_ttl_client = None
         self.embedding_model = None
         self.initialize_connections()
     
@@ -726,17 +725,6 @@ class DatabaseManager:
             print(f"[DatabaseManager] Vector DB connection failed: {e}")
             self.vector_db_client = None
         
-        # Initialize ChromaDB vector_db_ttl (TTL files)
-        try:
-            if Path(VECTOR_DB_TTL_PATH).exists():
-                self.vector_db_ttl_client = chromadb.PersistentClient(path=VECTOR_DB_TTL_PATH)
-                collections = self.vector_db_ttl_client.list_collections()
-                print(f"[DatabaseManager] Vector DB TTL connected - {len(collections)} collections available")
-            else:
-                print(f"[DatabaseManager] Vector DB TTL path not found: {VECTOR_DB_TTL_PATH}")
-        except Exception as e:
-            print(f"[DatabaseManager] Vector DB TTL connection failed: {e}")
-            self.vector_db_ttl_client = None
     
     def _init_embedding_model(self):
         """Initialize embedding model"""
@@ -815,9 +803,12 @@ class DatabaseManager:
             print(f"[DatabaseManager] Cosmos Gremlin query error: {e}")
         
         return results
+
     
     def query_vector_db(self, query_text: str, collection_name: str = None, n_results: int = 10) -> List[Dict]:
         """Query ChromaDB vector_db with reduced results"""
+        print(f"[DEBUG] query_vector_db called with query: '{query_text}'")
+        print(f"[DEBUG] collection_name: {collection_name}, n_results: {n_results}")
         if not self.vector_db_client or not self.embedding_model:
             return []
         
@@ -829,6 +820,7 @@ class DatabaseManager:
                 return []
             
             collection = collections[0] if not collection_name else self.vector_db_client.get_collection(collection_name)
+            print(f"[DEBUG] Using collection: {collection.name}")
             
             query_embedding = self.embedding_model.encode([query_text]).tolist()[0]
             
@@ -837,6 +829,7 @@ class DatabaseManager:
                 n_results=n_results,
                 include=['documents', 'metadatas', 'distances']
             )
+            print(f"[DEBUG] Query returned {len(query_results['ids'][0])} results")
             
             for i, (doc, metadata, distance) in enumerate(zip(
                 query_results['documents'][0],
@@ -856,49 +849,6 @@ class DatabaseManager:
             
         except Exception as e:
             print(f"[DatabaseManager] Vector DB query error: {e}")
-        
-        return results
-    
-    def query_vector_db_ttl(self, query_text: str, collection_name: str = None, n_results: int = 2) -> List[Dict]:
-        """Query ChromaDB vector_db_ttl with reduced results"""
-        if not self.vector_db_ttl_client or not self.embedding_model:
-            return []
-        
-        results = []
-        
-        try:
-            collections = self.vector_db_ttl_client.list_collections()
-            if not collections:
-                return []
-            
-            collection = collections[0] if not collection_name else self.vector_db_ttl_client.get_collection(collection_name)
-            
-            query_embedding = self.embedding_model.encode([query_text]).tolist()[0]
-            
-            query_results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results,
-                include=['documents', 'metadatas', 'distances']
-            )
-            
-            for i, (doc, metadata, distance) in enumerate(zip(
-                query_results['documents'][0],
-                query_results['metadatas'][0],
-                query_results['distances'][0]
-            )):
-                results.append({
-                    "type": "ttl_chunk",
-                    "content": doc[:300] + "..." if len(doc) > 300 else doc,  # Truncate long content
-                    "metadata": metadata,
-                    "similarity_score": round(1 - distance, 3),
-                    "source": "vector_db_ttl", 
-                    "collection": collection.name
-                })
-            
-            print(f"[DatabaseManager] Vector DB TTL query returned {len(results)} results")
-            
-        except Exception as e:
-            print(f"[DatabaseManager] Vector DB TTL query error: {e}")
         
         return results
     
@@ -937,13 +887,6 @@ class DatabaseManager:
             if self.vector_db_client:
                 collections = self.vector_db_client.list_collections()
                 status["vector_db"]["collections"] = [c.name for c in collections]
-        except:
-            pass
-        
-        try:
-            if self.vector_db_ttl_client:
-                collections = self.vector_db_ttl_client.list_collections()
-                status["vector_db_ttl"]["collections"] = [c.name for c in collections]
         except:
             pass
         
@@ -1317,9 +1260,6 @@ class IntegratedEntityAgent:
                 print(f"[IntegratedEntityAgent]   File {idx}: {fname} ({content_len} chars) - {'✅ READY' if has_content else '⚠️ INSUFFICIENT'}")
         else:
             print(f"[IntegratedEntityAgent] ⚠️ WARNING: No files provided (documents_context is None/empty)")
-        
-
-
 
         try:
             # Phase 1: Enhanced entity extraction FROM QUERY
@@ -1379,7 +1319,6 @@ class IntegratedEntityAgent:
             # Query each source with error handling
             cosmos_results = self._safe_query_cosmos(query, entities)
             vector_results = self._safe_query_vector(query)
-            vector_ttl_results = self._safe_query_vector_ttl(query)
             
             all_results["data_sources"] = {
                 "cosmos_gremlin": {
@@ -1391,18 +1330,12 @@ class IntegratedEntityAgent:
                     "results": vector_results,
                     "count": len(vector_results),
                     "status": "success" if vector_results else "no_results"
-                },
-                "vector_db_ttl": {
-                    "results": vector_ttl_results,
-                    "count": len(vector_ttl_results),
-                    "status": "success" if vector_ttl_results else "no_results"
                 }
             }
 
             # Store results for use in entity context and text sections
             self.last_retrieval_results = {
                 'vector_db': vector_results,
-                'vector_db_ttl': vector_ttl_results,
                 'cosmos': cosmos_results
             }
             
@@ -1461,18 +1394,11 @@ class IntegratedEntityAgent:
         """Safely query Vector DB"""
         try:
             print("[IntegratedEntityAgent] Querying Vector DB...")
-            return self.db_manager.query_vector_db(query)
+            import traceback
+            traceback.print_exc()
+            return self.db_manager.query_vector_db(query, collection_name="samm_all")
         except Exception as e:
             print(f"[IntegratedEntityAgent] Vector DB query failed: {e}")
-            return []
-    
-    def _safe_query_vector_ttl(self, query: str) -> List[Dict]:
-        """Safely query Vector DB TTL"""
-        try:
-            print("[IntegratedEntityAgent] Querying Vector DB TTL...")
-            return self.db_manager.query_vector_db_ttl(query)
-        except Exception as e:
-            print(f"[IntegratedEntityAgent] Vector DB TTL query failed: {e}")
             return []
     
     def _extract_entities_enhanced(self, query: str, intent_info: Dict) -> List[str]:
@@ -1780,25 +1706,17 @@ Provide SAMM Chapter 1 context for this entity:"""
         results = self.last_retrieval_results
     
         # Extract text from Vector DB results
-        if 'vector_db' in results and results['vector_db']:
+        if 'vector_db' in results and results['vector_db'] is not None:
+            vector_db_results = results['vector_db']
             print(f"[IntegratedEntityAgent] Processing {len(results['vector_db'])} vector DB results")
             for i, result in enumerate(results['vector_db'], 1):
                 content = result.get('content', '')
                 if content:
                     text_sections.append(content)
                     print(f"[DEBUG] Vector DB result {i}: {content[:200]}...")
-    
-        # Extract text from Vector DB TTL results
-        if 'vector_db_ttl' in results and results['vector_db_ttl']:
-            print(f"[IntegratedEntityAgent] Processing {len(results['vector_db_ttl'])} vector DB TTL results")
-            for i, result in enumerate(results['vector_db_ttl'], 1):
-                content = result.get('content', '')
-                if content:
-                    text_sections.append(content)
-                    print(f"[DEBUG] Vector DB TTL result {i}: {content[:200]}...")
-    
-        print(f"[IntegratedEntityAgent] Retrieved {len(text_sections)} text sections from databases")
+
         return text_sections
+    
     
     def _get_comprehensive_relationships(self, entities: List[str], data_sources: Dict) -> List[str]:
         """Get comprehensive relationships from all sources"""
@@ -1819,10 +1737,11 @@ Provide SAMM Chapter 1 context for this entity:"""
                 # Get relationships for this entity
                 if entity_id:
                     entity_rels = self.knowledge_graph.get_relationships(entity_id)
-                    for rel in entity_rels:
-                        rel_text = f"{rel['source']} {rel['relationship']} {rel['target']}"
-                        relationships.append(rel_text)
-                        print(f"[IntegratedEntityAgent] Knowledge graph relationship: {rel_text}")
+                    if entity_rels is not None:
+                        for rel in entity_rels:
+                            rel_text = f"{rel['source']} {rel['relationship']} {rel['target']}"
+                            relationships.append(rel_text)
+                            print(f"[IntegratedEntityAgent] Knowledge graph relationship: {rel_text}")
         
         # Add predefined relationships
         for entity in entities:
@@ -2621,13 +2540,20 @@ CRITICAL REQUIREMENTS:
             # Skip enhancement if answer is too short or contains errors
             if len(answer) < 20 or "Error" in answer:
                 return answer
-            
-            # Step 1: Add section references if missing critical ones
+
+            # Step 1: Add section reference if missing → take it from retriever top-k
             if not re.search(self.quality_patterns["section_references"], enhanced_answer):
-                entities = entity_info.get("entities", [])
-                if entities and any(entity in ["DSCA", "Security Assistance", "Security Cooperation"] for entity in entities):
-                    enhanced_answer += "\n\nRefer to relevant SAMM Chapter 1 sections for complete details."
-            
+                vr = (entity_info or {}).get("vector_result") or (entity_info or {}).get("retriever_result") or {}
+                metas = (vr.get("metadatas", [[]]) or [[]])[0]
+
+                secs = [ (m or {}).get("section_reference") for m in metas if (m or {}).get("section_reference") ]
+                if secs:
+                    # pick the most frequent section among top-k (stable) or fall back to the first
+                    from collections import Counter
+                    picked = Counter(secs).most_common(1)[0][0]
+                    enhanced_answer += f"\n\nSAMM Section Citation: {picked}"
+                    print("[CITE DBG]", {"picked": picked, "from": "retriever", "topk_secs": secs[:5]})
+
             # Step 2: Expand acronyms that appear without expansion (limit to prevent overprocessing)
             acronyms_found = re.findall(self.quality_patterns["acronym_detection"], enhanced_answer)
             
@@ -2992,7 +2918,6 @@ class SimpleStateOrchestrator:
                     "database_integration": {
                         "cosmos_gremlin": db_manager.cosmos_gremlin_client is not None,
                         "vector_db": db_manager.vector_db_client is not None,
-                        "vector_db_ttl": db_manager.vector_db_ttl_client is not None,
                         "embedding_model": db_manager.embedding_model is not None
                     },
                     # Add HIL and trigger update status
@@ -4144,7 +4069,6 @@ def get_system_status_for_ui():
         "database_integration": {
             "cosmos_gremlin": db_status["cosmos_gremlin"]["connected"],
             "vector_db": db_status["vector_db"]["connected"],
-            "vector_db_ttl": db_status["vector_db_ttl"]["connected"],
             "embedding_model": db_status["embedding_model"]["loaded"]
         },
         "cache": cache_stats_data,  # NEW: Cache statistics
@@ -4283,9 +4207,8 @@ def get_agents_status():
                 "database_features": {
                     "cosmos_gremlin_connected": database_status["cosmos_gremlin"]["connected"],
                     "vector_db_connected": database_status["vector_db"]["connected"],
-                    "vector_db_ttl_connected": database_status["vector_db_ttl"]["connected"],
                     "embedding_model_loaded": database_status["embedding_model"]["loaded"],
-                    "total_vector_collections": len(database_status["vector_db"]["collections"]) + len(database_status["vector_db_ttl"]["collections"])
+                    "total_vector_collections": len(database_status["vector_db"]["collections"]) 
                 },
                 "enhanced_features": {
                     "extraction_phases": agent_status["integrated_entity_agent"]["extraction_phases"],
@@ -4319,8 +4242,7 @@ def get_database_status():
                 "cosmos_gremlin_status": "connected" if database_status["cosmos_gremlin"]["connected"] else "disconnected",
                 "vector_databases": {
                     "vector_db_collections": len(database_status["vector_db"]["collections"]),
-                    "vector_db_ttl_collections": len(database_status["vector_db_ttl"]["collections"]),
-                    "total_collections": len(database_status["vector_db"]["collections"]) + len(database_status["vector_db_ttl"]["collections"])
+                    "total_collections": len(database_status["vector_db"]["collections"]) 
                 },
                 "embedding_model_status": "loaded" if database_status["embedding_model"]["loaded"] else "not_loaded"
             },
@@ -4369,10 +4291,6 @@ def get_samm_system_status():
                     "connected": database_status["vector_db"]["connected"],
                     "collections": database_status["vector_db"]["collections"]
                 },
-                "vector_db_ttl": {
-                    "connected": database_status["vector_db_ttl"]["connected"],
-                    "collections": database_status["vector_db_ttl"]["collections"]
-                }
             },
             "embedding_model": {
                 "loaded": database_status["embedding_model"]["loaded"],
@@ -4457,10 +4375,6 @@ def get_workflow_info():
                 "purpose": "Document vector search",
                 "query_type": "Semantic similarity search"
             },
-            "vector_db_ttl": {
-                "purpose": "TTL knowledge base search",
-                "query_type": "Semantic similarity search"
-            }
         },
         "transitions": {
             "initialize": "analyze_intent",
@@ -4607,7 +4521,6 @@ def get_knowledge_graph_info():
             },
             "vector_databases": {
                 "vector_db_collections": len(database_status["vector_db"]["collections"]),
-                "vector_db_ttl_collections": len(database_status["vector_db_ttl"]["collections"])
             },
             "embedding_model": {
                 "loaded": database_status["embedding_model"]["loaded"],
@@ -4640,7 +4553,6 @@ def health_check():
     database_healthy = any([
         database_status["cosmos_gremlin"]["connected"],
         database_status["vector_db"]["connected"],
-        database_status["vector_db_ttl"]["connected"]
     ])
     
     # Get cache stats
@@ -4664,7 +4576,6 @@ def health_check():
             "blob_storage": "healthy" if blob_service_client else "disabled",
             "cosmos_gremlin": "healthy" if database_status["cosmos_gremlin"]["connected"] else "disconnected",
             "vector_db": "healthy" if database_status["vector_db"]["connected"] else "disconnected",
-            "vector_db_ttl": "healthy" if database_status["vector_db_ttl"]["connected"] else "disconnected",
             "embedding_model": "healthy" if database_status["embedding_model"]["loaded"] else "not_loaded",
             "cache": "healthy" if cache_healthy else "disabled"  # NEW
         },
